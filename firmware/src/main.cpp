@@ -231,7 +231,7 @@ static void sendNotify(const char* json) {
 // and return to the status screen (next heartbeat will refresh the counts).
 static void sendDecision(const char* decision) {
   if (autoApprove) { M5.Speaker.tone(660, 80); }
-  char buf[96];
+  char buf[160];  // fits a full promptId[48] without truncating the JSON
   snprintf(buf, sizeof(buf),
            "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}\n",
            promptId, decision);
@@ -260,10 +260,8 @@ static void toggleAuto() {
 
 void loop() {
   M5.update();
-  if (promptId[0] != 0) {
-    if (M5.BtnA.wasPressed())      { sendDecision("allow"); }
-    else if (M5.BtnC.wasPressed()) { sendDecision("deny"); }
-  }
-  if (M5.BtnB.wasPressed()) { toggleAuto(); }
+  if (promptId[0] != 0 && M5.BtnA.wasPressed())      { sendDecision("allow"); }
+  else if (promptId[0] != 0 && M5.BtnC.wasPressed()) { sendDecision("deny"); }
+  else if (M5.BtnB.wasPressed())                     { toggleAuto(); }
   delay(20);
 }
