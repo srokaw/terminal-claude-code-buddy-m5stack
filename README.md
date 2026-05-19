@@ -170,3 +170,17 @@ tools/           — generators and converters
 The BLE API is only available when the desktop apps are in developer mode
 (**Help → Troubleshooting → Enable Developer Mode**). It's intended for
 makers and developers and isn't an officially supported product feature.
+
+---
+
+## terminal-claude-code-buddy-m5stack
+
+A fork adapting this project for the **M5Stack Core Basic**, driven by a local
+Python bridge instead of the Claude desktop app, for terminal Claude Code users.
+
+- `firmware/` — M5Stack Core Basic firmware
+- `bridge/`   — Python local bridge (BLE central)
+- `hooks/`    — Claude Code hook scripts
+- `docs/`     — design spec and implementation plans
+
+Anthropic's original firmware (`src/`, `characters/`, …) is kept as a protocol reference.
