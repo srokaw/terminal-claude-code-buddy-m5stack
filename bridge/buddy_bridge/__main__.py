@@ -1,34 +1,54 @@
-"""Entry point: run the socket server and the BLE link together."""
+"""Entry point: socket server + BLE link + permission broker."""
 import asyncio
 import os
 
 from buddy_bridge.ble_link import BleLink
-from buddy_bridge.protocol import encode_status
+from buddy_bridge.permissions import PermissionBroker
+from buddy_bridge.protocol import (
+    decode_device_message, encode_prompt, encode_prompt_cancel, encode_status)
 from buddy_bridge.socket_server import serve
 from buddy_bridge.state import SessionRegistry
 
-# Cross-process contract: this path MUST match the SOCK_PATH in
-# hooks/buddy-hook.py — both files use the same socket.
+# SOCK_PATH is a cross-process contract — must match hooks/buddy-hook.py
+# and hooks/buddy-permission-hook.py.
 SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
-
-# Strong references to in-flight send tasks so the GC cannot collect them
-# before they complete.
-_pending: set[asyncio.Task] = set()
 
 
 async def main() -> None:
     reg = SessionRegistry()
     link = BleLink()
+    _pending: set[asyncio.Task] = set()
 
-    def push() -> None:
-        snap = reg.snapshot()
-        payload = encode_status(snap["running"], snap["waiting"],
-                                snap["total"], snap["msg"])
-        t = asyncio.create_task(link.send(payload))
+    def spawn(coro) -> None:
+        t = asyncio.create_task(coro)
         _pending.add(t)
         t.add_done_callback(_pending.discard)
 
-    server = await serve(SOCK_PATH, reg, on_change=push)
+    def send_prompt(pid: str, tool: str, detail: str, change) -> None:
+        spawn(link.send(encode_prompt(pid, tool, detail, change)))
+
+    def send_cancel(pid: str) -> None:
+        spawn(link.send(encode_prompt_cancel(pid)))
+
+    broker = PermissionBroker(send_prompt=send_prompt, send_cancel=send_cancel)
+
+    def on_device_message(text: str) -> None:
+        msg = decode_device_message(text)
+        if msg is None:
+            return
+        if msg["cmd"] == "permission":
+            broker.resolve(msg["id"], msg["decision"])
+        elif msg["cmd"] == "auto":
+            broker.set_auto_approve(msg["state"])
+
+    link._on_device_message = on_device_message  # set before connect()
+
+    def push() -> None:
+        snap = reg.snapshot()
+        spawn(link.send(encode_status(snap["running"], snap["waiting"],
+                                      snap["total"], snap["msg"])))
+
+    server = await serve(SOCK_PATH, reg, on_change=push, broker=broker)
     print(f"[bridge] listening on {SOCK_PATH}")
     async with server:
         await asyncio.gather(server.serve_forever(), link.run_forever())
