@@ -139,12 +139,20 @@ void setup() {
 
   BLEService* svc = server->createService(NUS_SERVICE);
 
+  // Require an encrypted (bonded) link for all GATT access. Without these
+  // per-characteristic permissions the global MITM config is not enforced —
+  // a nearby unpaired central could write spoofed status to RX.
   txChar = svc->createCharacteristic(NUS_TX, BLECharacteristic::PROPERTY_NOTIFY);
-  txChar->addDescriptor(new BLE2902());
+  txChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
+  BLE2902* cccd = new BLE2902();
+  cccd->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED |
+                             ESP_GATT_PERM_WRITE_ENCRYPTED);
+  txChar->addDescriptor(cccd);
 
   BLECharacteristic* rxChar = svc->createCharacteristic(
       NUS_RX,
       BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  rxChar->setAccessPermissions(ESP_GATT_PERM_WRITE_ENCRYPTED);
   rxChar->setCallbacks(new RxCallbacks());
 
   svc->start();
