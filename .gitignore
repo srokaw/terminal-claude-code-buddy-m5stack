@@ -6,3 +6,5 @@ data/
 bridge/.venv/
 __pycache__/
 .pytest_cache/
+bridge/.venv/
+__pycache__/
