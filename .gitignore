@@ -2,3 +2,7 @@
 .vscode/
 .DS_Store
 data/
+
+bridge/.venv/
+__pycache__/
+.pytest_cache/
