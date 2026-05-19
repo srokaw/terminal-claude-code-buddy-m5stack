@@ -6,6 +6,7 @@ import pytest
 
 from buddy_bridge.state import SessionRegistry
 from buddy_bridge.socket_server import apply_event, serve
+from buddy_bridge.permissions import PermissionBroker
 
 
 def test_apply_event_start():
@@ -51,6 +52,32 @@ async def test_serve_receives_event_over_socket(tmp_path):
         await asyncio.sleep(0.1)
         assert reg.snapshot()["total"] == 1
         assert len(changes) == 1
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
+async def test_permission_request_gets_decision_response(tmp_path):
+    import asyncio, json, os
+    sock_path = "/tmp/buddy_perm_test.sock"
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        writer.write(json.dumps({"type": "permission_request", "id": "p1",
+                                 "session": "s1", "tool": "Bash",
+                                 "detail": "ls", "change": None}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        broker.resolve("p1", "allow")
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(line) == {"decision": "allow"}
+        writer.close()
     finally:
         server.close()
         await server.wait_closed()
