@@ -15,6 +15,9 @@
     ],
     "Notification": [
       {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
+    ],
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-permission-hook.py"}]}
     ]
   }
 }
