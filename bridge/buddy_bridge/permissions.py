@@ -38,7 +38,8 @@ class PermissionBroker:
         try:
             return await fut
         finally:
-            self._pending.pop(prompt_id, None)
+            if self._pending.get(prompt_id) is fut:
+                self._pending.pop(prompt_id, None)
 
     def resolve(self, prompt_id: str, decision: str) -> None:
         """A device decision arrived for prompt_id."""
