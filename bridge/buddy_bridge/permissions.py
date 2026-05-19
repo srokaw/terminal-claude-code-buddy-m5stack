@@ -8,9 +8,11 @@ class PermissionBroker:
 
     def __init__(self,
                  send_prompt: Callable[[str, str, str, str | None], None],
-                 send_cancel: Callable[[str], None]) -> None:
+                 send_cancel: Callable[[str], None],
+                 send_auto_fired=None) -> None:
         self._send_prompt = send_prompt
         self._send_cancel = send_cancel
+        self._send_auto_fired = send_auto_fired
         self._pending: dict[str, asyncio.Future] = {}
         self._auto_approve = False
 
@@ -25,6 +27,8 @@ class PermissionBroker:
                       change: str | None) -> str:
         """Return 'allow' or 'deny'. Auto-approve short-circuits to 'allow'."""
         if self._auto_approve:
+            if self._send_auto_fired is not None:
+                self._send_auto_fired(tool)
             return "allow"
         loop = asyncio.get_running_loop()
         # If there is already a live future for this id, resolve it to "deny"

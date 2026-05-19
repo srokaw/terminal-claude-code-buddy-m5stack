@@ -59,6 +59,11 @@ def test_request_decision_bridge_down(tmp_path, monkeypatch):
     assert result is None
 
 
+def test_skip_tools_includes_interaction_tools():
+    assert "AskUserQuestion" in hook.SKIP_TOOLS
+    assert "ExitPlanMode" in hook.SKIP_TOOLS
+
+
 def test_request_decision_gets_allow(monkeypatch):
     """A fake AF_UNIX server that replies allow -> request_decision returns 'allow'."""
     sock_path = tempfile.mktemp(prefix="buddy_test_", suffix=".sock", dir="/tmp")

@@ -37,6 +37,12 @@ def encode_prompt_cancel(prompt_id: str) -> bytes:
     return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def encode_auto_fired(tool: str) -> bytes:
+    """Encode a notification that the bridge just auto-approved a tool call."""
+    obj = {"evt": "auto_fired", "tool": tool}
+    return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def decode_device_message(line: str) -> dict | None:
     """Parse one device->bridge message. Returns the dict or None if invalid."""
     try:

@@ -54,6 +54,19 @@ def test_auto_approve_default_off():
 
 
 @pytest.mark.asyncio
+async def test_auto_approve_calls_send_auto_fired():
+    fired = []
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None,
+        send_cancel=lambda pid: None,
+        send_auto_fired=lambda tool: fired.append(tool))
+    broker.set_auto_approve(True)
+    decision = await broker.request("p1", "Bash", "ls", None)
+    assert decision == "allow"
+    assert fired == ["Bash"]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_prompt_id_does_not_orphan_second_request():
     """Regression: A's finally-pop must not remove B's future when prompt_id is reused."""
     broker, _, _ = make_broker()

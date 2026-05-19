@@ -35,6 +35,12 @@ def test_encode_prompt_cancel():
     assert obj == {"cmd": "prompt_cancel", "id": "p1"}
 
 
+def test_encode_auto_fired():
+    from buddy_bridge.protocol import encode_auto_fired
+    obj = json.loads(encode_auto_fired("Bash").decode())
+    assert obj == {"evt": "auto_fired", "tool": "Bash"}
+
+
 def test_decode_permission_decision():
     out = decode_device_message('{"cmd":"permission","id":"p1","decision":"allow"}')
     assert out == {"cmd": "permission", "id": "p1", "decision": "allow"}

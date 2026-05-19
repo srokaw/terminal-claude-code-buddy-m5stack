@@ -5,7 +5,8 @@ import os
 from buddy_bridge.ble_link import BleLink
 from buddy_bridge.permissions import PermissionBroker
 from buddy_bridge.protocol import (
-    decode_device_message, encode_prompt, encode_prompt_cancel, encode_status)
+    decode_device_message, encode_auto_fired, encode_prompt,
+    encode_prompt_cancel, encode_status)
 from buddy_bridge.socket_server import serve
 from buddy_bridge.state import SessionRegistry
 
@@ -30,7 +31,11 @@ async def main() -> None:
     def send_cancel(pid: str) -> None:
         spawn(link.send(encode_prompt_cancel(pid)))
 
-    broker = PermissionBroker(send_prompt=send_prompt, send_cancel=send_cancel)
+    def send_auto_fired(tool: str) -> None:
+        spawn(link.send(encode_auto_fired(tool)))
+
+    broker = PermissionBroker(send_prompt=send_prompt, send_cancel=send_cancel,
+                              send_auto_fired=send_auto_fired)
 
     def on_device_message(text: str) -> None:
         msg = decode_device_message(text)

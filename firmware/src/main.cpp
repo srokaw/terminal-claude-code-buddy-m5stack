@@ -37,6 +37,12 @@ static bool autoApprove       = false;
 // Set true when a central connects so loop() re-syncs the auto state once.
 static volatile bool pendingAutoSync = false;
 
+// Last-known status (for repaint after prompt clears or toast expires).
+static int lastRunning = 0, lastWaiting = 0, lastTotal = 0;
+static char lastStatusMsg[64] = "idle";
+static int autoCount = 0;
+static unsigned long autoFlashUntil = 0;  // millis() deadline for green toast
+
 // Renders the live status screen. Phase 1 shows counts only — no message
 // text or transcript content ever reaches the device.
 static void renderStatus(int running, int waiting, int total,
@@ -131,8 +137,13 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     DeserializationError err = deserializeJson(doc, v);
     if (err) return;
     if (doc["evt"] == "status") {
-      renderStatus(doc["running"] | 0, doc["waiting"] | 0,
-                   doc["total"] | 0, doc["msg"] | "");
+      lastRunning = doc["running"] | 0;
+      lastWaiting = doc["waiting"] | 0;
+      lastTotal   = doc["total"]   | 0;
+      strlcpy(lastStatusMsg, doc["msg"] | "", sizeof(lastStatusMsg));
+      if (promptId[0] == 0) {
+        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+      }
     } else if (doc["evt"] == "prompt") {
       strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       strlcpy(promptTool,   doc["tool"]   | "", sizeof(promptTool));
@@ -143,7 +154,25 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     } else if (doc["cmd"] == "prompt_cancel") {
       if (strcmp(doc["id"] | "", promptId) == 0) {
         promptId[0] = 0;
-        renderStatus(0, 0, 0, "");
+        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+      }
+    } else if (doc["evt"] == "auto_fired") {
+      autoCount++;
+      autoFlashUntil = millis() + 1500;
+      const char* tool = doc["tool"] | "";
+      // Green toast at the bottom over the current status screen.
+      M5.Display.fillRect(0, 200, 320, 40, TFT_DARKGREEN);
+      M5.Display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+      M5.Display.setTextSize(2);
+      M5.Display.setCursor(8, 210);
+      M5.Display.printf("Auto: %s (%d)", tool, autoCount);
+      // If the AUTO banner is on, refresh it with the new count.
+      if (autoApprove) {
+        M5.Display.fillRect(0, 0, 320, 28, TFT_RED);
+        M5.Display.setTextColor(TFT_WHITE, TFT_RED);
+        M5.Display.setTextSize(2);
+        M5.Display.setCursor(8, 6);
+        M5.Display.printf("AUTO ON · %d", autoCount);
       }
     }
   }
@@ -243,19 +272,19 @@ static void sendNotify(const char* json) {
 // Send the button decision back to the bridge, then clear the prompt state
 // and return to the status screen (next heartbeat will refresh the counts).
 static void sendDecision(const char* decision) {
-  if (autoApprove) { M5.Speaker.tone(660, 80); }
   char buf[160];  // fits a full promptId[48] without truncating the JSON
   snprintf(buf, sizeof(buf),
            "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}\n",
            promptId, decision);
   sendNotify(buf);
   promptId[0] = 0;           // clear pending prompt
-  renderStatus(0, 0, 0, ""); // back to status; next heartbeat refreshes counts
+  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
 }
 
 // Toggle auto-approve mode, notify the bridge, and show a banner + beep.
 static void toggleAuto() {
   autoApprove = !autoApprove;
+  if (!autoApprove) autoCount = 0;
   char buf[40];
   snprintf(buf, sizeof(buf), "{\"cmd\":\"auto\",\"state\":%s}\n",
            autoApprove ? "true" : "false");
@@ -266,8 +295,8 @@ static void toggleAuto() {
     M5.Display.setTextColor(TFT_WHITE, TFT_RED);
     M5.Display.setTextSize(2);
     M5.Display.setCursor(8, 6);
-    M5.Display.print("AUTO-APPROVE ON");
-    M5.Speaker.tone(880, 120);
+    M5.Display.printf("AUTO ON · %d", autoCount);
+    M5.Speaker.tone(880, 120);  // toggle-confirmation beep — keep
   }
 }
 
@@ -284,6 +313,21 @@ void loop() {
     sendNotify(buf);
     Serial.printf("[ble] sent auto-sync state=%s\n",
                   autoApprove ? "true" : "false");
+  }
+
+  if (autoFlashUntil != 0 && millis() > autoFlashUntil) {
+    autoFlashUntil = 0;
+    if (promptId[0] == 0) {
+      renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+      if (autoApprove) {
+        // Re-paint AUTO banner over the freshly rendered status.
+        M5.Display.fillRect(0, 0, 320, 28, TFT_RED);
+        M5.Display.setTextColor(TFT_WHITE, TFT_RED);
+        M5.Display.setTextSize(2);
+        M5.Display.setCursor(8, 6);
+        M5.Display.printf("AUTO ON · %d", autoCount);
+      }
+    }
   }
 
   if (promptId[0] != 0 && M5.BtnA.wasPressed())      { sendDecision("allow"); }

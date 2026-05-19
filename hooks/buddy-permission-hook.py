@@ -26,6 +26,12 @@ SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
 # SIGTERM-cancel relationship holds.
 DECISION_TIMEOUT = 45.0  # seconds to wait for a buddy button press
 
+# Tools that are an interaction, not a buddy-approvable action — a question or
+# a plan, not a command/file/network action. The device's binary allow/deny is
+# meaningless for these, so the hook ignores them and lets Claude Code's native
+# prompt handle them entirely.
+SKIP_TOOLS = ("AskUserQuestion", "ExitPlanMode")
+
 _sock = None
 _prompt_id = None
 
@@ -118,6 +124,8 @@ def main():
     session = hook_input.get("session_id", "")
     if not tool:
         sys.exit(0)
+    if tool in SKIP_TOOLS:
+        sys.exit(0)  # native prompt handles these; the buddy never shows them
     detail, change = build_detail(tool, tool_input)
     _prompt_id = str(uuid.uuid4())
 
