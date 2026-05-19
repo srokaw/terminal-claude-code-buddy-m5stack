@@ -29,10 +29,13 @@ static BLECharacteristic* txChar = nullptr;
 static volatile bool centralConnected = false;
 
 // Pending permission prompt state (empty id == no prompt).
-static char promptId[48]     = {0};
-static char promptTool[24]   = {0};
+static char promptId[48]      = {0};
+static char promptTool[24]    = {0};
 static char promptDetail[200] = {0};
-static bool autoApprove      = false;
+static char promptChange[40]  = {0};
+static bool autoApprove       = false;
+// Set true when a central connects so loop() re-syncs the auto state once.
+static volatile bool pendingAutoSync = false;
 
 // Renders the live status screen. Phase 1 shows counts only — no message
 // text or transcript content ever reaches the device.
@@ -76,8 +79,10 @@ static void renderStatus(int running, int waiting, int total,
 static void sendDecision(const char* decision);
 static void toggleAuto();
 
-// Permission-takeover screen: navy background, tool + detail, button hints.
-static void renderPrompt(const char* tool, const char* detail) {
+// Permission-takeover screen: navy background, tool + detail + optional change
+// size (e.g. "+3/-1 lines" for Edit/Write), and button hints.
+static void renderPrompt(const char* tool, const char* detail,
+                         const char* change) {
   M5.Display.fillScreen(TFT_NAVY);
   M5.Display.setTextColor(TFT_WHITE, TFT_NAVY);
   M5.Display.setTextSize(3);
@@ -87,6 +92,12 @@ static void renderPrompt(const char* tool, const char* detail) {
   M5.Display.setCursor(8, 50);
   M5.Display.setTextWrap(true);
   M5.Display.print(detail);              // full tool call; no file contents
+  if (change && change[0] != '\0') {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_NAVY);
+    M5.Display.setCursor(8, 140);
+    M5.Display.print(change);
+  }
   M5.Display.setTextColor(TFT_GREEN, TFT_NAVY);
   M5.Display.setCursor(8, 210);
   M5.Display.print("[A] Allow");
@@ -98,6 +109,7 @@ static void renderPrompt(const char* tool, const char* detail) {
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer*) override {
     centralConnected = true;
+    pendingAutoSync  = true;   // loop() will notify the bridge of current state
     Serial.println("[ble] central connected");
   }
   void onDisconnect(BLEServer* s) override {
@@ -125,8 +137,9 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       strlcpy(promptTool,   doc["tool"]   | "", sizeof(promptTool));
       strlcpy(promptDetail, doc["detail"] | "", sizeof(promptDetail));
+      strlcpy(promptChange, doc["change"] | "", sizeof(promptChange));
       if (autoApprove) { sendDecision("allow"); }
-      else             { renderPrompt(promptTool, promptDetail); }
+      else             { renderPrompt(promptTool, promptDetail, promptChange); }
     } else if (doc["cmd"] == "prompt_cancel") {
       if (strcmp(doc["id"] | "", promptId) == 0) {
         promptId[0] = 0;
@@ -260,6 +273,19 @@ static void toggleAuto() {
 
 void loop() {
   M5.update();
+
+  // Re-sync auto-approve state to a freshly (re-)connected bridge.
+  // We defer this to loop() so the BLE link is fully ready before notifying.
+  if (pendingAutoSync && centralConnected) {
+    pendingAutoSync = false;
+    char buf[40];
+    snprintf(buf, sizeof(buf), "{\"cmd\":\"auto\",\"state\":%s}\n",
+             autoApprove ? "true" : "false");
+    sendNotify(buf);
+    Serial.printf("[ble] sent auto-sync state=%s\n",
+                  autoApprove ? "true" : "false");
+  }
+
   if (promptId[0] != 0 && M5.BtnA.wasPressed())      { sendDecision("allow"); }
   else if (promptId[0] != 0 && M5.BtnC.wasPressed()) { sendDecision("deny"); }
   else if (M5.BtnB.wasPressed())                     { toggleAuto(); }
