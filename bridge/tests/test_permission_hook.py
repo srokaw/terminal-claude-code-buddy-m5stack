@@ -1,4 +1,5 @@
-import importlib.util, os
+import importlib.util
+import os
 
 spec = importlib.util.spec_from_file_location(
     "buddy_permission_hook",
@@ -18,11 +19,11 @@ def test_build_detail_edit_uses_path_and_size():
     detail, change = hook.build_detail("Edit", {
         "file_path": "/tmp/a.py", "old_string": "x\ny", "new_string": "z"})
     assert detail == "/tmp/a.py"
-    assert change is not None  # a "+N/-M" style size string
+    assert change is not None
 
 
 def test_build_detail_webfetch_uses_url():
-    detail, change = hook.build_detail("WebFetch", {"url": "https://x.test/a"})
+    detail, _ = hook.build_detail("WebFetch", {"url": "https://x.test/a"})
     assert detail == "https://x.test/a"
 
 
@@ -35,10 +36,12 @@ def test_build_detail_never_includes_file_contents():
 
 def test_decision_output_allow():
     out = hook.decision_output("allow")
-    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert out == {"hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "allow"}}}
 
 
 def test_decision_output_deny():
     out = hook.decision_output("deny")
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"

@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook — race the buddy device against the keyboard.
+"""Claude Code PermissionRequest hook -> buddy device.
 
-Wired to PreToolUse in ~/.claude/settings.json. Builds a privacy-safe detail
-string for the pending tool call, then waits on TWO inputs at once: a
-/dev/tty keyboard prompt and a permission_request to the bridge (which relays
-to the device). First answer wins. Prints the PreToolUse decision and exits 0.
+Registered under hooks.PermissionRequest in ~/.claude/settings.json. Claude
+Code fires this when it is about to show a native permission prompt. The
+native terminal prompt appears as normal; this hook concurrently relays the
+prompt to the buddy and, if a button is pressed, returns a decision that
+overrides the native prompt. If the buddy is not used (timeout / bridge down /
+device off), the hook outputs nothing and the native terminal prompt stands.
 
-Privacy: `detail` carries the tool call (command / path / URL) only — never
-file contents or diff bodies. See the design spec's Privacy section.
+Privacy: only the tool call (command / path / URL) is sent to the bridge —
+never file contents or diff bodies. See the design spec's Privacy section.
 """
 import json
 import os
-import select
+import signal
 import socket
 import sys
 import uuid
 
-SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")  # contract:
-# must match bridge/buddy_bridge/__main__.py
+# Cross-process contract: must match bridge/buddy_bridge/__main__.py.
+SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
+DECISION_TIMEOUT = 45.0  # seconds to wait for a buddy button press
+
+_sock = None
+_prompt_id = None
 
 
-def build_detail(tool: str, tool_input: dict):
+def build_detail(tool, tool_input):
     """Return (detail, change). detail is the tool call; change is a size
     string for Edit/Write or None. Never includes file contents."""
     if tool == "Bash":
@@ -32,138 +38,73 @@ def build_detail(tool: str, tool_input: dict):
         return str(tool_input.get("file_path", "")), change
     if tool == "Write":
         content = tool_input.get("content", "")
-        change = f"{content.count(chr(10)) + 1} lines"
-        return str(tool_input.get("file_path", "")), change
+        return (str(tool_input.get("file_path", "")),
+                f"{content.count(chr(10)) + 1} lines")
     if tool in ("WebFetch", "WebSearch"):
         return str(tool_input.get("url") or tool_input.get("query", "")), None
-    # Generic fallback: tool name only — never dump arbitrary input.
-    return tool, None
+    return tool, None  # generic fallback: tool name only
 
 
-def decision_output(decision: str) -> dict:
-    """Shape the PreToolUse hook output for allow/deny."""
+def decision_output(behavior):
+    """Shape the PermissionRequest hook stdout for an allow/deny decision."""
     return {"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": decision,
-        "permissionDecisionReason": f"claude-buddy: {decision}"}}
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": behavior}}}
 
 
-def _ask_bridge(sock: socket.socket, prompt_id: str, session: str,
-                tool: str, detail: str, change) -> None:
-    req = {"type": "permission_request", "id": prompt_id, "session": session,
-           "tool": tool, "detail": detail, "change": change}
-    sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
+def _send(sock, obj):
+    sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
 
 
-def race(prompt_id: str, session: str, tool: str, detail: str, change) -> str:
-    """Race the device (via bridge socket) against /dev/tty keyboard input.
-
-    Returns 'allow' or 'deny'. Falls back to keyboard-only if the bridge is
-    unreachable, and to 'ask' (handled by caller) if there is no tty.
-    """
-    # Bridge connection (may fail — then keyboard-only).
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(SOCK_PATH)
-        _ask_bridge(sock, prompt_id, session, tool, detail, change)
-    except OSError:
-        sock = None
-
-    # Keyboard via the controlling terminal.
-    try:
-        tty = open("/dev/tty", "r+b", buffering=0)
-    except OSError:
-        tty = None
-
-    if sock is None and tty is None:
-        return "ask"  # caller yields to Claude's native prompt
-
-    if tty is not None:
-        tty.write(f"\n[buddy] Approve {tool}: {detail}\n"
-                  f"  [a]llow  [d]eny  (or press a button on your buddy)\n"
-                  .encode("utf-8"))
-
-    import tty as ttymod
-    import termios
-    old = None
-    if tty is not None:
-        old = termios.tcgetattr(tty.fileno())
-        ttymod.setcbreak(tty.fileno())
-
-    try:
-        fds = [f for f in (sock, tty) if f is not None]
-        sock_buf = b""
-        while True:
-            readable, _, _ = select.select(fds, [], [], 60.0)
-            if not readable:
-                # Timeout: no answer from device or keyboard; yield to Claude.
-                return "ask"
-            if tty is not None and tty in readable:
-                ch = tty.read(1)
-                if ch in (b"a", b"A"):
-                    if sock is not None:
-                        _cancel(sock, prompt_id)
-                    return "allow"
-                if ch in (b"d", b"D"):
-                    if sock is not None:
-                        _cancel(sock, prompt_id)
-                    return "deny"
-            if sock is not None and sock in readable:
-                data = sock.recv(4096)
-                if not data:
-                    fds = [f for f in fds if f is not sock]
-                    sock = None
-                    if tty is None:
-                        return "deny"
-                    continue
-                sock_buf += data
-                while b"\n" in sock_buf:
-                    raw_line, sock_buf = sock_buf.split(b"\n", 1)
-                    if not raw_line.strip():
-                        continue
-                    try:
-                        resp = json.loads(raw_line.decode("utf-8"))
-                    except (ValueError, UnicodeDecodeError):
-                        continue
-                    if resp.get("decision") in ("allow", "deny"):
-                        return resp["decision"]
-    finally:
-        if tty is not None and old is not None:
-            termios.tcsetattr(tty.fileno(), termios.TCSADRAIN, old)
-            tty.close()
-        if sock is not None:
-            sock.close()
+def _cancel_and_exit(*_):
+    """Timeout or SIGTERM: clear the buddy prompt, yield to the native prompt."""
+    if _sock is not None and _prompt_id is not None:
+        try:
+            _send(_sock, {"type": "prompt_cancel", "id": _prompt_id})
+        except OSError:
+            pass
+    sys.exit(0)  # no JSON on stdout -> native terminal prompt stands
 
 
-def _cancel(sock: socket.socket, prompt_id: str) -> None:
-    try:
-        sock.sendall(
-            (json.dumps({"type": "prompt_cancel", "id": prompt_id}) + "\n")
-            .encode("utf-8"))
-    except OSError:
-        pass
-
-
-def main() -> None:
+def main():
+    global _sock, _prompt_id
     try:
         hook_input = json.load(sys.stdin)
     except (ValueError, OSError):
-        sys.exit(0)  # yield to Claude's native prompt
+        sys.exit(0)
     tool = hook_input.get("tool_name", "")
     tool_input = hook_input.get("tool_input", {}) or {}
     session = hook_input.get("session_id", "")
     if not tool:
         sys.exit(0)
     detail, change = build_detail(tool, tool_input)
-    prompt_id = str(uuid.uuid4())
+    _prompt_id = str(uuid.uuid4())
+
     try:
-        decision = race(prompt_id, session, tool, detail, change)
-    except Exception:
-        sys.exit(0)  # any failure: yield to Claude's native prompt
-    if decision == "ask":
-        sys.exit(0)
-    print(json.dumps(decision_output(decision)))
+        _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        _sock.connect(SOCK_PATH)
+    except OSError:
+        sys.exit(0)  # bridge down -> native prompt stands
+
+    signal.signal(signal.SIGTERM, _cancel_and_exit)
+    try:
+        _send(_sock, {"type": "permission_request", "id": _prompt_id,
+                      "session": session, "tool": tool,
+                      "detail": detail, "change": change})
+        _sock.settimeout(DECISION_TIMEOUT)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = _sock.recv(256)
+            if not chunk:
+                sys.exit(0)  # bridge closed -> native prompt stands
+            buf += chunk
+        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    except (OSError, ValueError):
+        _cancel_and_exit()
+        return
+    decision = resp.get("decision")
+    if decision in ("allow", "deny"):
+        print(json.dumps(decision_output(decision)))
     sys.exit(0)
 
 
