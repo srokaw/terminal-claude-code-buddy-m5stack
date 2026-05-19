@@ -6,16 +6,20 @@ from bleak.exc import BleakError
 
 # Nordic UART Service — matches the firmware.
 NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # central writes here
+NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device notifies here
 DEVICE_NAME = "Claude-Buddy"
 
 
 class BleLink:
     """Maintains a connection to the buddy device and writes status lines."""
 
-    def __init__(self, device_name: str = DEVICE_NAME) -> None:
+    def __init__(self, device_name: str = DEVICE_NAME,
+                 on_device_message=None) -> None:
         self._device_name = device_name
         self._client: BleakClient | None = None
         self._last_payload: bytes | None = None
+        self._on_device_message = on_device_message
+        self._rx_buffer = b""
 
     @property
     def connected(self) -> bool:
@@ -30,6 +34,7 @@ class BleLink:
                 return False
             client = BleakClient(device)
             await client.connect()
+            await client.start_notify(NUS_TX, self._handle_notify)
             self._client = client
             if self._last_payload is not None:
                 try:
@@ -41,6 +46,16 @@ class BleLink:
         except BleakError:
             return False
         return True
+
+    def _handle_notify(self, _char, data: bytes) -> None:
+        if self._on_device_message is None:
+            return
+        self._rx_buffer += data
+        while b"\n" in self._rx_buffer:
+            line, self._rx_buffer = self._rx_buffer.split(b"\n", 1)
+            text = line.decode("utf-8", errors="ignore").strip()
+            if text:
+                self._on_device_message(text)
 
     async def send(self, payload: bytes) -> None:
         """Write a status payload. Caches it for re-send after reconnect."""
