@@ -23,6 +23,48 @@ def apply_event(reg: SessionRegistry, event: dict) -> None:
             reg.set_state(session, state)
 
 
+async def _handle_permission(reader, writer, broker, event) -> None:
+    """Race broker.request() against further lines on the same connection.
+
+    This keeps the read loop alive so prompt_cancel and EOF are noticed
+    without parking the handler. On EOF (hook disconnected) the pending
+    broker future is cleaned up. On prompt_cancel the broker future is
+    resolved and the response is sent back.
+    """
+    pid = event.get("id", "")
+    req_task = asyncio.create_task(broker.request(
+        pid, event.get("tool", ""), event.get("detail", ""), event.get("change")))
+    read_task = asyncio.create_task(reader.readline())
+    while True:
+        done, _ = await asyncio.wait(
+            {req_task, read_task}, return_when=asyncio.FIRST_COMPLETED)
+        if read_task in done:
+            line = read_task.result()
+            if not line:                       # hook disconnected
+                broker.cancel(pid)             # resolve+clean the pending future
+                req_task.cancel()
+                return
+            try:
+                msg = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                msg = {}
+            if msg.get("type") == "prompt_cancel" and msg.get("id") == pid:
+                broker.cancel(pid)             # keyboard won
+            read_task = asyncio.create_task(reader.readline())
+        if req_task in done:
+            read_task.cancel()
+            break
+    try:
+        decision = await req_task
+    except asyncio.CancelledError:
+        return
+    try:
+        writer.write((json.dumps({"decision": decision}) + "\n").encode())
+        await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+
+
 async def serve(sock_path: str, reg: SessionRegistry,
                 on_change: Callable[[], None],
                 broker=None) -> asyncio.AbstractServer:
@@ -46,12 +88,10 @@ async def serve(sock_path: str, reg: SessionRegistry,
                     continue
                 etype = event.get("type")
                 if etype == "permission_request" and broker is not None:
-                    decision = await broker.request(
-                        event.get("id", ""), event.get("tool", ""),
-                        event.get("detail", ""), event.get("change"))
-                    writer.write(
-                        (json.dumps({"decision": decision}) + "\n").encode())
-                    await writer.drain()
+                    await _handle_permission(reader, writer, broker, event)
+                    # After _handle_permission returns, the connection loop ends:
+                    # the hook process closes after receiving the decision.
+                    break
                 elif etype == "prompt_cancel" and broker is not None:
                     broker.cancel(event.get("id", ""))
                 else:

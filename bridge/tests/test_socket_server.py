@@ -86,6 +86,75 @@ async def test_permission_request_gets_decision_response(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_permission_request_connection_drop_cleans_up(tmp_path):
+    """If the hook disconnects before any decision, broker._pending must be empty."""
+    import tempfile
+    sock_path = tempfile.mktemp(prefix="buddy_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        writer.write(json.dumps({"type": "permission_request", "id": "p99",
+                                 "session": "s1", "tool": "Bash",
+                                 "detail": "ls", "change": None}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        # Close the connection without sending a decision.
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        await asyncio.sleep(0.15)
+        assert broker._pending == {}, (
+            f"Expected empty _pending after connection drop, got {broker._pending}")
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
+async def test_prompt_cancel_on_same_connection_resolves(tmp_path):
+    """prompt_cancel sent on the SAME connection must resolve the pending request."""
+    import tempfile
+    sock_path = tempfile.mktemp(prefix="buddy_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        pid = "pcancel1"
+        writer.write(json.dumps({"type": "permission_request", "id": pid,
+                                 "session": "s1", "tool": "Bash",
+                                 "detail": "rm -rf /", "change": None}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        # Send prompt_cancel on the same connection (keyboard won).
+        writer.write(json.dumps({"type": "prompt_cancel", "id": pid}).encode() + b"\n")
+        await writer.drain()
+        # The bridge should respond with a decision (deny from cancel).
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        resp = json.loads(line)
+        assert resp.get("decision") in ("allow", "deny"), (
+            f"Expected allow/deny decision, got {resp}")
+        # Broker future must be resolved (no leak).
+        await asyncio.sleep(0.1)
+        assert broker._pending == {}, (
+            f"Expected empty _pending after cancel, got {broker._pending}")
+        writer.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
 async def test_serve_survives_garbage_then_valid_event(tmp_path):
     """Server must stay alive after receiving non-JSON garbage; a subsequent
     valid event from a new connection must still be applied."""

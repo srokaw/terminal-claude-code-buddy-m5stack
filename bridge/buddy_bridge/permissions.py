@@ -27,6 +27,11 @@ class PermissionBroker:
         if self._auto_approve:
             return "allow"
         loop = asyncio.get_running_loop()
+        # If there is already a live future for this id, resolve it to "deny"
+        # so the old caller isn't orphaned.
+        existing = self._pending.get(prompt_id)
+        if existing is not None and not existing.done():
+            existing.set_result("deny")
         fut: asyncio.Future = loop.create_future()
         self._pending[prompt_id] = fut
         self._send_prompt(prompt_id, tool, detail, change)

@@ -51,6 +51,10 @@ class BleLink:
         if self._on_device_message is None:
             return
         self._rx_buffer += data
+        # Guard against unbounded growth when the device never sends a newline.
+        if len(self._rx_buffer) > 8192:
+            self._rx_buffer = b""
+            return
         while b"\n" in self._rx_buffer:
             line, self._rx_buffer = self._rx_buffer.split(b"\n", 1)
             text = line.decode("utf-8", errors="ignore").strip()

@@ -93,8 +93,12 @@ def race(prompt_id: str, session: str, tool: str, detail: str, change) -> str:
 
     try:
         fds = [f for f in (sock, tty) if f is not None]
+        sock_buf = b""
         while True:
-            readable, _, _ = select.select(fds, [], [])
+            readable, _, _ = select.select(fds, [], [], 60.0)
+            if not readable:
+                # Timeout: no answer from device or keyboard; yield to Claude.
+                return "ask"
             if tty is not None and tty in readable:
                 ch = tty.read(1)
                 if ch in (b"a", b"A"):
@@ -106,19 +110,21 @@ def race(prompt_id: str, session: str, tool: str, detail: str, change) -> str:
                         _cancel(sock, prompt_id)
                     return "deny"
             if sock is not None and sock in readable:
-                data = sock.recv(256)
+                data = sock.recv(4096)
                 if not data:
                     fds = [f for f in fds if f is not sock]
                     sock = None
                     if tty is None:
                         return "deny"
                     continue
-                for line in data.splitlines():
-                    if not line.strip():
+                sock_buf += data
+                while b"\n" in sock_buf:
+                    raw_line, sock_buf = sock_buf.split(b"\n", 1)
+                    if not raw_line.strip():
                         continue
                     try:
-                        resp = json.loads(line.decode("utf-8"))
-                    except ValueError:
+                        resp = json.loads(raw_line.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
                         continue
                     if resp.get("decision") in ("allow", "deny"):
                         return resp["decision"]
