@@ -33,8 +33,10 @@ async def serve(sock_path: str, reg: SessionRegistry,
     async def handle(reader: asyncio.StreamReader,
                      writer: asyncio.StreamWriter) -> None:
         try:
-            data = await reader.read(4096)
-            for line in data.splitlines():
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
                 if not line.strip():
                     continue
                 try:

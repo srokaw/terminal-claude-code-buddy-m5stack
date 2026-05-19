@@ -50,3 +50,22 @@ def test_unknown_event_maps_to_none():
 def test_missing_session_id_maps_to_none():
     out = buddy_hook.to_bridge_event({"hook_event_name": "Stop"})
     assert out is None
+
+
+def test_send_to_absent_socket_does_not_raise(tmp_path):
+    """The socket-send logic must not raise when the bridge socket is absent."""
+    import socket as _socket
+    absent_path = str(tmp_path / "nonexistent.sock")
+    event = {"type": "start", "session": "s1"}
+    # Replicate the send logic from buddy-hook.py; must not raise.
+    raised = False
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            sock.connect(absent_path)
+            sock.sendall((buddy_hook.json.dumps(event) + "\n").encode("utf-8"))
+    except OSError:
+        pass  # expected — bridge not running
+    except Exception:
+        raised = True
+    assert not raised

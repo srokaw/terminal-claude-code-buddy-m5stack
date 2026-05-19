@@ -10,6 +10,8 @@ import os
 import socket
 import sys
 
+# Cross-process contract: this path MUST match the SOCK_PATH in
+# bridge/buddy_bridge/__main__.py — both files use the same socket.
 SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
 
 _EVENT_MAP = {
