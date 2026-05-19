@@ -16,10 +16,14 @@ import os
 import signal
 import socket
 import sys
+import time
 import uuid
 
 # Cross-process contract: must match bridge/buddy_bridge/__main__.py.
 SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
+# DECISION_TIMEOUT must stay below the `timeout` set on the PermissionRequest
+# hook entry in ~/.claude/settings.json (currently 60 s) so that Claude Code's
+# SIGTERM-cancel relationship holds.
 DECISION_TIMEOUT = 45.0  # seconds to wait for a buddy button press
 
 _sock = None
@@ -66,6 +70,43 @@ def _cancel_and_exit(*_):
     sys.exit(0)  # no JSON on stdout -> native terminal prompt stands
 
 
+def request_decision(prompt_id, session, tool, detail, change):
+    """Connect to the bridge, send a permission_request, and return the decision.
+
+    Returns "allow", "deny", or None (bridge down / timeout / closed /
+    malformed).  Never calls sys.exit — safe to call from tests.
+    """
+    global _sock, _prompt_id
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(SOCK_PATH)
+    except OSError:
+        return None  # bridge down -> native prompt stands
+
+    _sock = sock
+    _prompt_id = prompt_id
+    try:
+        _send(sock, {"type": "permission_request", "id": prompt_id,
+                     "session": session, "tool": tool,
+                     "detail": detail, "change": change})
+        deadline = time.monotonic() + DECISION_TIMEOUT
+        buf = b""
+        while b"\n" not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(buf) > 65536:
+                return None  # deadline/overflow -> caller decides to cancel
+            sock.settimeout(remaining)
+            chunk = sock.recv(256)
+            if not chunk:
+                return None  # bridge closed -> native prompt stands
+            buf += chunk
+        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    except (OSError, ValueError):
+        return None  # I/O or parse error -> native prompt stands
+    decision = resp.get("decision")
+    return decision if decision in ("allow", "deny") else None
+
+
 def main():
     global _sock, _prompt_id
     try:
@@ -80,32 +121,14 @@ def main():
     detail, change = build_detail(tool, tool_input)
     _prompt_id = str(uuid.uuid4())
 
-    try:
-        _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        _sock.connect(SOCK_PATH)
-    except OSError:
-        sys.exit(0)  # bridge down -> native prompt stands
-
     signal.signal(signal.SIGTERM, _cancel_and_exit)
-    try:
-        _send(_sock, {"type": "permission_request", "id": _prompt_id,
-                      "session": session, "tool": tool,
-                      "detail": detail, "change": change})
-        _sock.settimeout(DECISION_TIMEOUT)
-        buf = b""
-        while b"\n" not in buf:
-            chunk = _sock.recv(256)
-            if not chunk:
-                sys.exit(0)  # bridge closed -> native prompt stands
-            buf += chunk
-        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
-    except (OSError, ValueError):
-        _cancel_and_exit()
-        return
-    decision = resp.get("decision")
-    if decision in ("allow", "deny"):
+    decision = request_decision(_prompt_id, session, tool, detail, change)
+    if decision is not None:
         print(json.dumps(decision_output(decision)))
-    sys.exit(0)
+        sys.exit(0)
+    # No decision (timeout / bridge down / error): try to clear any buddy prompt
+    # then let the native terminal prompt stand (exit 0, no stdout).
+    _cancel_and_exit()
 
 
 if __name__ == "__main__":

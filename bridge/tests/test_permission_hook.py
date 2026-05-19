@@ -1,5 +1,9 @@
 import importlib.util
+import json
 import os
+import socket
+import tempfile
+import threading
 
 spec = importlib.util.spec_from_file_location(
     "buddy_permission_hook",
@@ -45,3 +49,35 @@ def test_decision_output_deny():
     out = hook.decision_output("deny")
     assert out["hookSpecificOutput"]["decision"]["behavior"] == "deny"
     assert out["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+
+
+def test_request_decision_bridge_down(tmp_path, monkeypatch):
+    """When no server is listening at SOCK_PATH, returns None without raising."""
+    dead_path = tempfile.mktemp(prefix="buddy_dead_", suffix=".sock", dir="/tmp")
+    monkeypatch.setattr(hook, "SOCK_PATH", dead_path)
+    result = hook.request_decision("pid-1", "sess-1", "Bash", "ls", None)
+    assert result is None
+
+
+def test_request_decision_gets_allow(monkeypatch):
+    """A fake AF_UNIX server that replies allow -> request_decision returns 'allow'."""
+    sock_path = tempfile.mktemp(prefix="buddy_test_", suffix=".sock", dir="/tmp")
+    monkeypatch.setattr(hook, "SOCK_PATH", sock_path)
+
+    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server_sock.bind(sock_path)
+    server_sock.listen(1)
+
+    def _serve():
+        conn, _ = server_sock.accept()
+        conn.recv(4096)  # consume the permission_request line
+        conn.sendall(json.dumps({"decision": "allow"}).encode("utf-8") + b"\n")
+        conn.close()
+        server_sock.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+
+    result = hook.request_decision("pid-2", "sess-2", "Bash", "echo hi", None)
+    t.join(timeout=5)
+    assert result == "allow"
