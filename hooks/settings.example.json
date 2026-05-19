@@ -1,0 +1,20 @@
+{
+  "_comment": "Phase 1 hook wiring for Claude Buddy. Merge the \"hooks\" block below into ~/.claude/settings.json. If a \"hooks\" key already exists there, add these five keys alongside the existing ones. The command path must be absolute.",
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
+    ],
+    "Notification": [
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
+    ]
+  }
+}
