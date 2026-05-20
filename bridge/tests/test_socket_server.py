@@ -6,6 +6,7 @@ import pytest
 
 from buddy_bridge.state import SessionRegistry
 from buddy_bridge.socket_server import apply_event, serve
+from buddy_bridge.permissions import PermissionBroker
 
 
 def test_apply_event_start():
@@ -51,6 +52,102 @@ async def test_serve_receives_event_over_socket(tmp_path):
         await asyncio.sleep(0.1)
         assert reg.snapshot()["total"] == 1
         assert len(changes) == 1
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
+async def test_permission_request_gets_decision_response(tmp_path):
+    import asyncio, json, os
+    sock_path = "/tmp/buddy_perm_test.sock"
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        writer.write(json.dumps({"type": "permission_request", "id": "p1",
+                                 "session": "s1", "tool": "Bash",
+                                 "detail": "ls", "change": None}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        broker.resolve("p1", "allow")
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(line) == {"decision": "allow"}
+        writer.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
+async def test_permission_request_connection_drop_cleans_up(tmp_path):
+    """If the hook disconnects before any decision, broker._pending must be empty."""
+    import tempfile
+    sock_path = tempfile.mktemp(prefix="buddy_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        writer.write(json.dumps({"type": "permission_request", "id": "p99",
+                                 "session": "s1", "tool": "Bash",
+                                 "detail": "ls", "change": None}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        # Close the connection without sending a decision.
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        await asyncio.sleep(0.15)
+        assert broker._pending == {}, (
+            f"Expected empty _pending after connection drop, got {broker._pending}")
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
+async def test_prompt_cancel_on_same_connection_resolves(tmp_path):
+    """prompt_cancel sent on the SAME connection must resolve the pending request."""
+    import tempfile
+    sock_path = tempfile.mktemp(prefix="buddy_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock_path)
+        pid = "pcancel1"
+        writer.write(json.dumps({"type": "permission_request", "id": pid,
+                                 "session": "s1", "tool": "Bash",
+                                 "detail": "rm -rf /", "change": None}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        # Send prompt_cancel on the same connection (keyboard won).
+        writer.write(json.dumps({"type": "prompt_cancel", "id": pid}).encode() + b"\n")
+        await writer.drain()
+        # The bridge should respond with a decision (None/null from cancel,
+        # meaning the hook abstains and native prompt handles it).
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        resp = json.loads(line)
+        assert "decision" in resp, (
+            f"Expected decision key in response, got {resp}")
+        # Broker future must be resolved (no leak).
+        await asyncio.sleep(0.1)
+        assert broker._pending == {}, (
+            f"Expected empty _pending after cancel, got {broker._pending}")
+        writer.close()
     finally:
         server.close()
         await server.wait_closed()

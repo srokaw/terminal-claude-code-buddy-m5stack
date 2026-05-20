@@ -1,5 +1,10 @@
 # Claude Buddy — Phase 2: Permission Race — Implementation Plan
 
+> **SUPERSEDED** by `2026-05-19-claude-buddy-phase2-permission-request-hook.md`.
+> This plan built the hook on `PreToolUse` + a `/dev/tty` keyboard race.
+> Verification proved hooks cannot open `/dev/tty`, and `PermissionRequest` is
+> the correct hook. Kept for history only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Approve or deny Claude Code tool-permission prompts from the M5Stack — racing the device buttons against a terminal keyboard prompt, with a device-side auto-approve toggle.
