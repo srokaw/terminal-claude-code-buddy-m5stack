@@ -137,11 +137,12 @@ async def test_prompt_cancel_on_same_connection_resolves(tmp_path):
         # Send prompt_cancel on the same connection (keyboard won).
         writer.write(json.dumps({"type": "prompt_cancel", "id": pid}).encode() + b"\n")
         await writer.drain()
-        # The bridge should respond with a decision (deny from cancel).
+        # The bridge should respond with a decision (None/null from cancel,
+        # meaning the hook abstains and native prompt handles it).
         line = await asyncio.wait_for(reader.readline(), timeout=1.0)
         resp = json.loads(line)
-        assert resp.get("decision") in ("allow", "deny"), (
-            f"Expected allow/deny decision, got {resp}")
+        assert "decision" in resp, (
+            f"Expected decision key in response, got {resp}")
         # Broker future must be resolved (no leak).
         await asyncio.sleep(0.1)
         assert broker._pending == {}, (

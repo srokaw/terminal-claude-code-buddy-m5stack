@@ -17,8 +17,33 @@ SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
 
 async def main() -> None:
     reg = SessionRegistry()
-    link = BleLink()
     _pending: set[asyncio.Task] = set()
+
+    # Broker must be constructed before on_device_message (references it), but
+    # send_prompt/send_cancel/send_auto_fired reference link — define them as
+    # closures after link is created.  We forward-declare broker here and wire
+    # the callbacks in the same block as link construction below.
+
+    # Define message / disconnect callbacks first so they can be passed to BleLink.
+    broker_ref: list = []  # single-element list used as a mutable cell
+
+    def on_device_message(text: str) -> None:
+        broker = broker_ref[0]
+        msg = decode_device_message(text)
+        if msg is None:
+            return
+        if msg["cmd"] == "permission":
+            broker.resolve(msg["id"], msg["decision"])
+        elif msg["cmd"] == "auto":
+            broker.set_auto_approve(msg["state"])
+        elif msg["cmd"] == "prompt_busy":
+            broker.cancel(msg["id"])  # firmware busy -> hook yields to native
+
+    def on_disconnect() -> None:
+        broker = broker_ref[0]
+        broker.set_auto_approve(False)  # safe default until device re-confirms
+
+    link = BleLink(on_device_message=on_device_message, on_disconnect=on_disconnect)
 
     def spawn(coro) -> None:
         t = asyncio.create_task(coro)
@@ -36,22 +61,13 @@ async def main() -> None:
 
     broker = PermissionBroker(send_prompt=send_prompt, send_cancel=send_cancel,
                               send_auto_fired=send_auto_fired)
-
-    def on_device_message(text: str) -> None:
-        msg = decode_device_message(text)
-        if msg is None:
-            return
-        if msg["cmd"] == "permission":
-            broker.resolve(msg["id"], msg["decision"])
-        elif msg["cmd"] == "auto":
-            broker.set_auto_approve(msg["state"])
-
-    link._on_device_message = on_device_message  # set before connect()
+    broker_ref.append(broker)
 
     def push() -> None:
         snap = reg.snapshot()
         spawn(link.send(encode_status(snap["running"], snap["waiting"],
-                                      snap["total"], snap["msg"])))
+                                      snap["total"], snap["msg"]),
+                        replayable=True))
 
     server = await serve(SOCK_PATH, reg, on_change=push, broker=broker)
     print(f"[bridge] listening on {SOCK_PATH}")

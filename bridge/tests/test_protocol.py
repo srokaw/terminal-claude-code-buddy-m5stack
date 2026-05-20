@@ -58,3 +58,18 @@ def test_decode_rejects_bad_decision():
 def test_decode_rejects_garbage():
     assert decode_device_message("not json") is None
     assert decode_device_message('{"cmd":"unknown"}') is None
+
+
+def test_encode_get_auto():
+    from buddy_bridge.protocol import encode_get_auto
+    obj = json.loads(encode_get_auto().decode())
+    assert obj == {"cmd": "get_auto"}
+
+
+def test_decode_prompt_busy():
+    out = decode_device_message('{"cmd":"prompt_busy","id":"p1"}')
+    assert out == {"cmd": "prompt_busy", "id": "p1"}
+
+
+def test_decode_prompt_busy_requires_id():
+    assert decode_device_message('{"cmd":"prompt_busy"}') is None

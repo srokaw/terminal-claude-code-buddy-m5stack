@@ -82,6 +82,7 @@ static void renderStatus(int running, int waiting, int total,
 }
 
 // Forward declarations for functions called from RxCallbacks (defined later).
+static void sendNotify(const char* json);
 static void sendDecision(const char* decision);
 static void toggleAuto();
 
@@ -145,6 +146,15 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     } else if (doc["evt"] == "prompt") {
+      const char* incomingId = doc["id"] | "";
+      if (promptId[0] != 0 && strcmp(incomingId, promptId) != 0) {
+        // Already showing a different prompt — tell the bridge to fall back.
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "{\"cmd\":\"prompt_busy\",\"id\":\"%s\"}\n", incomingId);
+        sendNotify(buf);
+        return;
+      }
       strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       strlcpy(promptTool,   doc["tool"]   | "", sizeof(promptTool));
       strlcpy(promptDetail, doc["detail"] | "", sizeof(promptDetail));
@@ -156,6 +166,11 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         promptId[0] = 0;
         renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
+    } else if (doc["cmd"] == "get_auto") {
+      char buf[40];
+      snprintf(buf, sizeof(buf), "{\"cmd\":\"auto\",\"state\":%s}\n",
+               autoApprove ? "true" : "false");
+      sendNotify(buf);
     } else if (doc["evt"] == "auto_fired") {
       autoCount++;
       autoFlashUntil = millis() + 1500;

@@ -32,13 +32,12 @@ async def test_request_sends_prompt_and_awaits_resolve():
 
 
 @pytest.mark.asyncio
-async def test_cancel_makes_request_return_deny():
+async def test_cancel_makes_request_return_none():
     broker, _, cancelled = make_broker()
     task = asyncio.create_task(broker.request("p1", "Bash", "ls", None))
     await asyncio.sleep(0.05)
     broker.cancel("p1")
-    # keyboard won; the bridge side resolves to "deny" so it stops waiting
-    assert await task == "deny"
+    assert await task is None
     assert cancelled == ["p1"]
 
 

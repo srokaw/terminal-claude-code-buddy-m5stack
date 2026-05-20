@@ -52,9 +52,9 @@ class PermissionBroker:
             fut.set_result(decision)
 
     def cancel(self, prompt_id: str) -> None:
-        """The keyboard answered first; stop waiting and clear the device."""
+        """Abandon a pending request. The hook receives no decision (None) and
+        outputs no JSON, so Claude Code's native prompt handles it."""
         fut = self._pending.get(prompt_id)
         if fut is not None and not fut.done():
             self._send_cancel(prompt_id)
-            fut.set_result("deny")  # bridge side stops waiting; hook owns the
-                                    # real decision it already returned
+            fut.set_result(None)

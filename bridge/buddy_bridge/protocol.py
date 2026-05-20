@@ -43,6 +43,11 @@ def encode_auto_fired(tool: str) -> bytes:
     return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def encode_get_auto() -> bytes:
+    """Bridge-driven query: ask the device for its current auto-approve state."""
+    return b'{"cmd":"get_auto"}\n'
+
+
 def decode_device_message(line: str) -> dict | None:
     """Parse one device->bridge message. Returns the dict or None if invalid."""
     try:
@@ -60,5 +65,9 @@ def decode_device_message(line: str) -> dict | None:
     if cmd == "auto":
         if isinstance(obj.get("state"), bool):
             return {"cmd": "auto", "state": obj["state"]}
+        return None
+    if cmd == "prompt_busy":
+        if obj.get("id"):
+            return {"cmd": "prompt_busy", "id": obj["id"]}
         return None
     return None
