@@ -36,6 +36,27 @@ _sock = None
 _prompt_id = None
 
 
+# Fields known to carry large content. Values replaced by a length summary
+# before serialization so the device never receives the actual content.
+_CONTENT_FIELDS = ("content", "body", "old_string", "new_string", "text", "data")
+_DETAIL_MAX = 200
+
+
+def _generic_detail(tool_input):
+    """Serialize an unknown tool's input safely: summarize content-heavy
+    fields by length, cap total detail length. The device sees roughly what
+    the native prompt would show, never raw blobs."""
+    if not isinstance(tool_input, dict):
+        return str(tool_input)[:_DETAIL_MAX]
+    summarized = {
+        k: (f"<{len(v)} chars>" if k in _CONTENT_FIELDS and isinstance(v, str)
+            else v)
+        for k, v in tool_input.items()
+    }
+    s = json.dumps(summarized, separators=(",", ":"))
+    return s if len(s) <= _DETAIL_MAX else s[: _DETAIL_MAX - 1] + "…"
+
+
 def build_detail(tool, tool_input):
     """Return (detail, change). detail is the tool call; change is a size
     string for Edit/Write or None. Never includes file contents."""
@@ -52,7 +73,11 @@ def build_detail(tool, tool_input):
                 f"{content.count(chr(10)) + 1} lines")
     if tool in ("WebFetch", "WebSearch"):
         return str(tool_input.get("url") or tool_input.get("query", "")), None
-    return tool, None  # generic fallback: tool name only
+    # Unknown tool (e.g. user-built MCP): serialize args with big-content
+    # fields summarized. Better than just showing the tool name (which
+    # would mean blind device approvals) and avoids the per-tool
+    # maintenance hazard of fail-closed.
+    return _generic_detail(tool_input), None
 
 
 def decision_output(behavior):

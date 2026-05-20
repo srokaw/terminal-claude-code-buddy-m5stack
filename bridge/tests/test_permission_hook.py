@@ -86,3 +86,36 @@ def test_request_decision_gets_allow(monkeypatch):
     result = hook.request_decision("pid-2", "sess-2", "Bash", "echo hi", None)
     t.join(timeout=5)
     assert result == "allow"
+
+
+def test_build_detail_unknown_tool_serializes_args():
+    detail, change = hook.build_detail("MyCustomTool",
+                                       {"url": "https://x.test", "mode": "write"})
+    assert change is None
+    # Detail is JSON containing the args, not just the tool name.
+    assert "https://x.test" in detail
+    assert "mode" in detail
+    assert detail != "MyCustomTool"
+
+
+def test_build_detail_unknown_tool_summarizes_content_fields():
+    big = "X" * 5000
+    detail, _ = hook.build_detail("MyMcpTool",
+                                  {"file": "/tmp/x", "body": big})
+    # The 5000-char body must NEVER appear in the detail.
+    assert big not in detail
+    assert "<5000 chars>" in detail
+    assert "/tmp/x" in detail
+
+
+def test_build_detail_unknown_tool_caps_length():
+    detail, _ = hook.build_detail("MyMcpTool",
+                                  {"a": "x" * 1000, "b": "y" * 1000})
+    # 'a' and 'b' aren't on the content-field denylist, so they get
+    # included literally — but the whole detail must still be capped.
+    assert len(detail) <= 200
+
+
+def test_build_detail_unknown_tool_non_dict_input():
+    detail, _ = hook.build_detail("WeirdTool", "just-a-string")
+    assert detail == "just-a-string"
