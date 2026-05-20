@@ -187,3 +187,68 @@ async def test_serve_survives_garbage_then_valid_event(tmp_path):
         await server.wait_closed()
         if os.path.exists(sock_path):
             os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
+async def test_ask_request_round_trip(tmp_path):
+    import tempfile
+    sock = tempfile.mktemp(prefix="buddy_ask_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    sent_ask = []
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None, send_cancel=lambda *a: None,
+        send_ask=lambda pid, ms, qs: sent_ask.append((pid, ms, qs)),
+        send_ask_cancel=lambda *a: None)
+    server = await serve(sock, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock)
+        req = {"type": "ask_request", "id": "k1", "multiSelect": False,
+               "questions": [{"text": "?",
+                              "options": [{"label": "X", "desc": ""}]}]}
+        writer.write((json.dumps(req) + "\n").encode())
+        await writer.drain()
+        # Give the server a tick to invoke broker.ask
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+            if sent_ask:
+                break
+        assert sent_ask and sent_ask[0][0] == "k1"
+        broker.resolve_ask("k1", [{"label": "X"}])
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(line) == {"answers": [{"label": "X"}]}
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock):
+            os.unlink(sock)
+
+
+@pytest.mark.asyncio
+async def test_ask_cancel_from_hook(tmp_path):
+    import tempfile
+    sock = tempfile.mktemp(prefix="buddy_ask_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    cancels = []
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None, send_cancel=lambda *a: None,
+        send_ask=lambda *a: None,
+        send_ask_cancel=lambda pid: cancels.append(pid))
+    server = await serve(sock, reg, on_change=lambda: None, broker=broker)
+    try:
+        reader, writer = await asyncio.open_unix_connection(sock)
+        writer.write((json.dumps({"type": "ask_request", "id": "k2",
+                                  "multiSelect": False, "questions": []}) +
+                      "\n").encode())
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        writer.write((json.dumps({"type": "ask_cancel", "id": "k2"}) +
+                      "\n").encode())
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(line) == {"answers": None}
+        assert cancels == ["k2"]
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock):
+            os.unlink(sock)
