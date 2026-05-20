@@ -3,6 +3,7 @@ import asyncio
 
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
+from buddy_bridge.protocol import encode_get_auto
 
 # Nordic UART Service — matches the firmware.
 NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # central writes here
@@ -33,9 +34,7 @@ class BleLink:
                 self._device_name, timeout=15.0)
             if device is None:
                 return False
-            from buddy_bridge.protocol import encode_get_auto
-            client = BleakClient(device)
-            client.set_disconnected_callback(lambda _c: self._handle_disconnect())
+            client = BleakClient(device, disconnected_callback=lambda _c: self._handle_disconnect())
             await client.connect()
             self._client = client
             await client.start_notify(NUS_TX, self._handle_notify)
