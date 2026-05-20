@@ -87,3 +87,49 @@ async def test_duplicate_prompt_id_does_not_orphan_second_request():
     broker.resolve("dup", "allow")
     result_b = await asyncio.wait_for(task_b, timeout=1.0)
     assert result_b == "allow"
+
+
+@pytest.mark.asyncio
+async def test_ask_request_resolves_with_answers():
+    sent = []
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None,
+        send_cancel=lambda *a: None,
+        send_ask=lambda pid, ms, qs: sent.append(("ask", pid, ms, qs)),
+        send_ask_cancel=lambda pid: sent.append(("cancel", pid)))
+    task = asyncio.create_task(broker.ask("askid",
+        multi_select=False,
+        questions=[{"text": "Q?", "options": [{"label": "A", "desc": ""}]}]))
+    await asyncio.sleep(0)  # let the broker send the request
+    assert sent[0][0] == "ask"
+    broker.resolve_ask("askid", [{"label": "A"}])
+    answers = await task
+    assert answers == [{"label": "A"}]
+
+
+@pytest.mark.asyncio
+async def test_ask_request_cancel_returns_none():
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None, send_cancel=lambda *a: None,
+        send_ask=lambda *a: None, send_ask_cancel=lambda *a: None)
+    task = asyncio.create_task(broker.ask("askid", multi_select=False,
+                                          questions=[]))
+    await asyncio.sleep(0)
+    broker.cancel_ask("askid")
+    assert await task is None
+
+
+@pytest.mark.asyncio
+async def test_ask_and_permission_dont_collide():
+    """Both futures can be in flight under different ids; resolving one
+    doesn't affect the other."""
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None, send_cancel=lambda *a: None,
+        send_ask=lambda *a: None, send_ask_cancel=lambda *a: None)
+    perm_task = asyncio.create_task(broker.request("p1", "Bash", "ls", None))
+    ask_task = asyncio.create_task(broker.ask("a1", False, []))
+    await asyncio.sleep(0)
+    broker.resolve("p1", "allow")
+    broker.resolve_ask("a1", [{"label": "X"}])
+    assert await perm_task == "allow"
+    assert await ask_task == [{"label": "X"}]
