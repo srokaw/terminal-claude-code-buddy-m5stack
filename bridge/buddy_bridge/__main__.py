@@ -5,8 +5,8 @@ import os
 from buddy_bridge.ble_link import BleLink
 from buddy_bridge.permissions import PermissionBroker
 from buddy_bridge.protocol import (
-    decode_device_message, encode_auto_fired, encode_prompt,
-    encode_prompt_cancel, encode_status)
+    decode_device_message, encode_ask_cancel, encode_ask_request,
+    encode_auto_fired, encode_prompt, encode_prompt_cancel, encode_status)
 from buddy_bridge.socket_server import serve
 from buddy_bridge.state import SessionRegistry
 
@@ -38,6 +38,8 @@ async def main() -> None:
             broker.set_auto_approve(msg["state"])
         elif msg["cmd"] == "prompt_busy":
             broker.cancel(msg["id"])  # firmware busy -> hook yields to native
+        elif msg["cmd"] == "ask_answer":
+            broker.resolve_ask(msg["id"], msg["answers"])
 
     def on_disconnect() -> None:
         broker = broker_ref[0]
@@ -59,8 +61,15 @@ async def main() -> None:
     def send_auto_fired(tool: str) -> None:
         spawn(link.send(encode_auto_fired(tool)))
 
+    def send_ask(aid: str, multi_select: bool, questions: list) -> None:
+        spawn(link.send(encode_ask_request(aid, multi_select, questions)))
+
+    def send_ask_cancel(aid: str) -> None:
+        spawn(link.send(encode_ask_cancel(aid)))
+
     broker = PermissionBroker(send_prompt=send_prompt, send_cancel=send_cancel,
-                              send_auto_fired=send_auto_fired)
+                              send_auto_fired=send_auto_fired,
+                              send_ask=send_ask, send_ask_cancel=send_ask_cancel)
     broker_ref.append(broker)
 
     def push() -> None:
