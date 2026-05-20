@@ -25,12 +25,13 @@ SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
 # hook entry in ~/.claude/settings.json (currently 60 s) so that Claude Code's
 # SIGTERM-cancel relationship holds.
 DECISION_TIMEOUT = 45.0  # seconds to wait for a buddy button press
+ASK_TIMEOUT = 60.0  # seconds — asks can have multiple questions; allow more.
 
 # Tools that are an interaction, not a buddy-approvable action — a question or
 # a plan, not a command/file/network action. The device's binary allow/deny is
 # meaningless for these, so the hook ignores them and lets Claude Code's native
 # prompt handle them entirely.
-SKIP_TOOLS = ("AskUserQuestion", "ExitPlanMode")
+SKIP_TOOLS = ("ExitPlanMode",)
 
 _sock = None
 _prompt_id = None
@@ -80,6 +81,29 @@ def build_detail(tool, tool_input):
     return _generic_detail(tool_input), None
 
 
+def ask_decision_output(questions, answers):
+    """Build the PermissionRequest stdout that pre-fills an AskUserQuestion.
+
+    `questions` is the original `tool_input["questions"]` (each item carries
+    `question` and `options`). `answers` is the device's positional response
+    list (one entry per question, either {"label":...} or {"labels":[...]}).
+    The resulting `updatedInput.answers` dict is keyed by question text.
+    """
+    answers_map = {}
+    for q, a in zip(questions, answers):
+        key = q.get("question", "")
+        if "labels" in a:
+            answers_map[key] = list(a["labels"])
+        else:
+            answers_map[key] = a.get("label", "")
+    return {"hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "allow",
+                     "updatedInput": {
+                         "questions": questions,
+                         "answers": answers_map}}}}
+
+
 def decision_output(behavior):
     """Shape the PermissionRequest hook stdout for an allow/deny decision."""
     return {"hookSpecificOutput": {
@@ -91,14 +115,19 @@ def _send(sock, obj):
     sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
 
 
+# Set by main() so _cancel_and_exit knows which family this run belongs to.
+_ask_mode = False
+
+
 def _cancel_and_exit(*_):
-    """Timeout or SIGTERM: clear the buddy prompt, yield to the native prompt."""
+    """Timeout or SIGTERM: clear the buddy screen, yield to the native prompt."""
     if _sock is not None and _prompt_id is not None:
+        cancel_type = "ask_cancel" if _ask_mode else "prompt_cancel"
         try:
-            _send(_sock, {"type": "prompt_cancel", "id": _prompt_id})
+            _send(_sock, {"type": cancel_type, "id": _prompt_id})
         except OSError:
             pass
-    sys.exit(0)  # no JSON on stdout -> native terminal prompt stands
+    sys.exit(0)
 
 
 def request_decision(prompt_id, session, tool, detail, change):
@@ -138,6 +167,43 @@ def request_decision(prompt_id, session, tool, detail, change):
     return decision if decision in ("allow", "deny") else None
 
 
+def request_answers(ask_id, multi_select, questions):
+    """Connect to the bridge, send an ask_request, return the answers list.
+
+    Returns the list of per-question answers (each {"label":...} or
+    {"labels":[...]}), or None on bridge down / timeout / cancel / closed /
+    malformed. Never calls sys.exit — safe to call from tests.
+    """
+    global _sock, _prompt_id
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(SOCK_PATH)
+    except OSError:
+        return None
+    _sock = sock
+    _prompt_id = ask_id
+    try:
+        _send(sock, {"type": "ask_request", "id": ask_id,
+                     "multiSelect": multi_select,
+                     "questions": questions})
+        deadline = time.monotonic() + ASK_TIMEOUT
+        buf = b""
+        while b"\n" not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(buf) > 65536:
+                return None
+            sock.settimeout(remaining)
+            chunk = sock.recv(512)
+            if not chunk:
+                return None
+            buf += chunk
+        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    answers = resp.get("answers")
+    return answers if isinstance(answers, list) else None
+
+
 def main():
     global _sock, _prompt_id
     try:
@@ -151,16 +217,34 @@ def main():
         sys.exit(0)
     if tool in SKIP_TOOLS:
         sys.exit(0)  # native prompt handles these; the buddy never shows them
-    detail, change = build_detail(tool, tool_input)
-    _prompt_id = str(uuid.uuid4())
 
+    global _ask_mode
+    _prompt_id = str(uuid.uuid4())
     signal.signal(signal.SIGTERM, _cancel_and_exit)
+
+    if tool == "AskUserQuestion":
+        _ask_mode = True
+        questions = tool_input.get("questions", []) or []
+        multi_select = any(q.get("multiSelect") for q in questions)
+        # Strip down to the fields the device needs (text + options).
+        device_qs = [{"text": q.get("question", ""),
+                      "options": [{"label": o.get("label", ""),
+                                   "desc":  o.get("description", "")}
+                                  for o in (q.get("options") or [])]}
+                     for q in questions]
+        answers = request_answers(_prompt_id, multi_select, device_qs)
+        if answers is not None and len(answers) == len(questions):
+            print(json.dumps(ask_decision_output(questions, answers)))
+            sys.exit(0)
+        _cancel_and_exit()
+        return
+
+    # Default branch: binary permission prompt.
+    detail, change = build_detail(tool, tool_input)
     decision = request_decision(_prompt_id, session, tool, detail, change)
     if decision is not None:
         print(json.dumps(decision_output(decision)))
         sys.exit(0)
-    # No decision (timeout / bridge down / error): try to clear any buddy prompt
-    # then let the native terminal prompt stand (exit 0, no stdout).
     _cancel_and_exit()
 
 

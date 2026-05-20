@@ -59,9 +59,10 @@ def test_request_decision_bridge_down(tmp_path, monkeypatch):
     assert result is None
 
 
-def test_skip_tools_includes_interaction_tools():
-    assert "AskUserQuestion" in hook.SKIP_TOOLS
+def test_skip_tools_includes_exit_plan_mode():
+    # AskUserQuestion was removed from SKIP_TOOLS in Phase 2.5 (handled by hook branch).
     assert "ExitPlanMode" in hook.SKIP_TOOLS
+    assert "AskUserQuestion" not in hook.SKIP_TOOLS
 
 
 def test_request_decision_gets_allow(monkeypatch):
@@ -119,3 +120,40 @@ def test_build_detail_unknown_tool_caps_length():
 def test_build_detail_unknown_tool_non_dict_input():
     detail, _ = hook.build_detail("WeirdTool", "just-a-string")
     assert detail == "just-a-string"
+
+
+def test_ask_no_longer_in_skip_tools():
+    # SKIP_TOOLS used to include AskUserQuestion (Phase 2 stop-gap).
+    # Phase 2.5 handles it; the skip set should be exactly ExitPlanMode.
+    assert hook.SKIP_TOOLS == ("ExitPlanMode",)
+
+
+def test_ask_decision_output_shape():
+    out = hook.ask_decision_output(
+        questions=[{"question": "Q1?", "options": [{"label": "A"}, {"label": "B"}]}],
+        answers=[{"label": "A"}])
+    assert out == {"hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "allow",
+                     "updatedInput": {
+                         "questions": [{"question": "Q1?",
+                                        "options": [{"label": "A"}, {"label": "B"}]}],
+                         "answers": {"Q1?": "A"}}}}}
+
+
+def test_ask_decision_output_multi_select():
+    out = hook.ask_decision_output(
+        questions=[{"question": "Pick many?", "options": [
+            {"label": "A"}, {"label": "B"}, {"label": "C"}]}],
+        answers=[{"labels": ["A", "C"]}])
+    assert (out["hookSpecificOutput"]["decision"]["updatedInput"]["answers"]
+            == {"Pick many?": ["A", "C"]})
+
+
+def test_ask_decision_output_multi_question():
+    out = hook.ask_decision_output(
+        questions=[{"question": "Q1?", "options": [{"label": "A"}]},
+                   {"question": "Q2?", "options": [{"label": "B"}]}],
+        answers=[{"label": "A"}, {"label": "B"}])
+    assert (out["hookSpecificOutput"]["decision"]["updatedInput"]["answers"]
+            == {"Q1?": "A", "Q2?": "B"})
