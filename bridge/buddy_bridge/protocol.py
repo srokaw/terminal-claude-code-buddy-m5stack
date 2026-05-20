@@ -48,6 +48,27 @@ def encode_get_auto() -> bytes:
     return b'{"cmd":"get_auto"}\n'
 
 
+def encode_ask_request(prompt_id: str, multi_select: bool,
+                       questions: list) -> bytes:
+    """Encode an AskUserQuestion prompt for the device.
+
+    `questions` is a list of `{"text": ..., "options": [{"label": ..., "desc": ...}, ...]}`
+    dicts. Question text and option labels/descriptions go to the device verbatim
+    — the user is reading them to decide. Never any other tool input or
+    transcript content.
+    """
+    obj = {"evt": "ask", "id": prompt_id,
+           "multiSelect": multi_select,
+           "questions": questions}
+    return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def encode_ask_cancel(prompt_id: str) -> bytes:
+    """Tell the device to clear an ask screen resolved on the keyboard."""
+    obj = {"cmd": "ask_cancel", "id": prompt_id}
+    return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def decode_device_message(line: str) -> dict | None:
     """Parse one device->bridge message. Returns the dict or None if invalid."""
     try:
@@ -70,4 +91,19 @@ def decode_device_message(line: str) -> dict | None:
         if obj.get("id"):
             return {"cmd": "prompt_busy", "id": obj["id"]}
         return None
+    if cmd == "ask_answer":
+        answers = obj.get("answers")
+        if not obj.get("id") or not isinstance(answers, list):
+            return None
+        # Each answer must be {"label": str} OR {"labels": [str, ...]}.
+        for a in answers:
+            if not isinstance(a, dict):
+                return None
+            if "label" in a and isinstance(a["label"], str):
+                continue
+            if "labels" in a and isinstance(a["labels"], list) and \
+                    all(isinstance(x, str) for x in a["labels"]):
+                continue
+            return None
+        return {"cmd": "ask_answer", "id": obj["id"], "answers": answers}
     return None

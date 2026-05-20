@@ -73,3 +73,49 @@ def test_decode_prompt_busy():
 
 def test_decode_prompt_busy_requires_id():
     assert decode_device_message('{"cmd":"prompt_busy"}') is None
+
+
+def test_encode_ask_request_minimal():
+    from buddy_bridge.protocol import encode_ask_request
+    out = encode_ask_request(
+        "abc", multi_select=False,
+        questions=[{"text": "Which pkg manager?",
+                    "options": [{"label": "npm",  "desc": "Default"},
+                                {"label": "pnpm", "desc": "Fast"}]}])
+    assert out.endswith(b"\n")
+    obj = json.loads(out)
+    assert obj == {
+        "evt": "ask", "id": "abc", "multiSelect": False,
+        "questions": [{"text": "Which pkg manager?",
+                       "options": [{"label": "npm",  "desc": "Default"},
+                                   {"label": "pnpm", "desc": "Fast"}]}]}
+
+
+def test_encode_ask_cancel():
+    from buddy_bridge.protocol import encode_ask_cancel
+    out = encode_ask_cancel("abc")
+    assert out == b'{"cmd":"ask_cancel","id":"abc"}\n'
+
+
+def test_decode_ask_answer_single_select():
+    from buddy_bridge.protocol import decode_device_message
+    msg = decode_device_message(
+        '{"cmd":"ask_answer","id":"abc","answers":[{"label":"pnpm"}]}')
+    assert msg == {"cmd": "ask_answer", "id": "abc",
+                   "answers": [{"label": "pnpm"}]}
+
+
+def test_decode_ask_answer_multi_select():
+    from buddy_bridge.protocol import decode_device_message
+    msg = decode_device_message(
+        '{"cmd":"ask_answer","id":"abc","answers":[{"labels":["A","B"]}]}')
+    assert msg == {"cmd": "ask_answer", "id": "abc",
+                   "answers": [{"labels": ["A", "B"]}]}
+
+
+def test_decode_ask_answer_requires_id_and_answers():
+    from buddy_bridge.protocol import decode_device_message
+    assert decode_device_message('{"cmd":"ask_answer"}') is None
+    assert decode_device_message('{"cmd":"ask_answer","id":"abc"}') is None
+    assert decode_device_message(
+        '{"cmd":"ask_answer","answers":[{"label":"x"}]}') is None
