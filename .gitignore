@@ -6,3 +6,7 @@ data/
 bridge/.venv/
 __pycache__/
 .pytest_cache/
+
+# Local Superpowers working dirs (brainstorm sessions, server logs — contain absolute paths)
+.superpowers/
+
