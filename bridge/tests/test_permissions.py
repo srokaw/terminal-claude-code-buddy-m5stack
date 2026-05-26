@@ -65,28 +65,11 @@ async def test_auto_approve_calls_send_auto_fired():
     assert fired == ["Bash"]
 
 
-@pytest.mark.asyncio
-async def test_duplicate_prompt_id_does_not_orphan_second_request():
-    """Regression: A's finally-pop must not remove B's future when prompt_id is reused."""
-    broker, _, _ = make_broker()
-
-    # Task A starts waiting on "dup"
-    task_a = asyncio.create_task(broker.request("dup", "Bash", "cmd_a", None))
-    await asyncio.sleep(0.05)  # let A install its future
-
-    # Task B arrives with the same prompt_id; this resolves A to "deny"
-    # and installs B's own future in _pending["dup"]
-    task_b = asyncio.create_task(broker.request("dup", "Bash", "cmd_b", None))
-    await asyncio.sleep(0.05)  # let B install its future; A's finally runs here
-
-    # A should have been resolved to "deny" by B's arrival
-    assert await task_a == "deny"
-
-    # Resolve B explicitly — if A's finally orphaned B, this resolve does nothing
-    # and task_b hangs, so we give it a short timeout
-    broker.resolve("dup", "allow")
-    result_b = await asyncio.wait_for(task_b, timeout=1.0)
-    assert result_b == "allow"
+# NOTE: The old test_duplicate_prompt_id_does_not_orphan_second_request was
+# removed with the FIFO-queue rewrite. The queue keys entries by prompt_id
+# (_entries[id]), so it assumes ids are unique. That holds in production: the
+# hook generates a fresh uuid4 per invocation. The old duplicate-id eviction
+# behavior no longer exists by design.
 
 
 @pytest.mark.asyncio
