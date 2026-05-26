@@ -119,3 +119,14 @@ def test_decode_ask_answer_requires_id_and_answers():
     assert decode_device_message('{"cmd":"ask_answer","id":"abc"}') is None
     assert decode_device_message(
         '{"cmd":"ask_answer","answers":[{"label":"x"}]}') is None
+
+
+def test_decode_ask_cancel_from_device():
+    from buddy_bridge.protocol import decode_device_message
+    msg = decode_device_message('{"cmd":"ask_cancel","id":"abc"}')
+    assert msg == {"cmd": "ask_cancel", "id": "abc"}
+
+
+def test_decode_ask_cancel_requires_id():
+    from buddy_bridge.protocol import decode_device_message
+    assert decode_device_message('{"cmd":"ask_cancel"}') is None

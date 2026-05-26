@@ -133,3 +133,23 @@ async def test_ask_and_permission_dont_collide():
     broker.resolve_ask("a1", [{"label": "X"}])
     assert await perm_task == "allow"
     assert await ask_task == [{"label": "X"}]
+
+
+@pytest.mark.asyncio
+async def test_cancel_unknown_permission_id_is_safe_noop():
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None, send_cancel=lambda *a: None,
+        send_ask=lambda *a: None, send_ask_cancel=lambda *a: None)
+    # No pending permission with this id; must not raise.
+    broker.cancel("does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_cancel_ask_resolves_pending_ask_to_none():
+    broker = PermissionBroker(
+        send_prompt=lambda *a: None, send_cancel=lambda *a: None,
+        send_ask=lambda *a: None, send_ask_cancel=lambda *a: None)
+    task = asyncio.create_task(broker.ask("a9", False, []))
+    await asyncio.sleep(0)
+    broker.cancel_ask("a9")
+    assert await task is None

@@ -106,4 +106,8 @@ def decode_device_message(line: str) -> dict | None:
                 continue
             return None
         return {"cmd": "ask_answer", "id": obj["id"], "answers": answers}
+    if cmd == "ask_cancel":
+        if obj.get("id"):
+            return {"cmd": "ask_cancel", "id": obj["id"]}
+        return None
     return None

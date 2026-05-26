@@ -37,9 +37,14 @@ async def main() -> None:
         elif msg["cmd"] == "auto":
             broker.set_auto_approve(msg["state"])
         elif msg["cmd"] == "prompt_busy":
-            broker.cancel(msg["id"])  # firmware busy -> hook yields to native
+            # The id may belong to either family; cancelling the wrong one is a
+            # safe no-op. Whichever request was rejected yields to the native UI.
+            broker.cancel(msg["id"])
+            broker.cancel_ask(msg["id"])
         elif msg["cmd"] == "ask_answer":
             broker.resolve_ask(msg["id"], msg["answers"])
+        elif msg["cmd"] == "ask_cancel":
+            broker.cancel_ask(msg["id"])
 
     def on_disconnect() -> None:
         broker = broker_ref[0]
