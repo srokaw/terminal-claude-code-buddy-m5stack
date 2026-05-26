@@ -227,31 +227,29 @@ static void askClear() {
 }
 
 static void askSendAnswers() {
-  // Build {"cmd":"ask_answer","id":"<id>","answers":[ ... ]}\n
-  char buf[1024];
-  int n = snprintf(buf, sizeof(buf),
-                   "{\"cmd\":\"ask_answer\",\"id\":\"%s\",\"answers\":[", askId);
-  for (int i = 0; i < askQCount && n < (int)sizeof(buf) - 4; ++i) {
-    if (i > 0) n += snprintf(buf + n, sizeof(buf) - n, ",");
+  // Build {"cmd":"ask_answer","id":"<id>","answers":[ ... ]} with ArduinoJson
+  // so option labels containing quotes/backslashes are correctly escaped.
+  JsonDocument doc;
+  doc["cmd"] = "ask_answer";
+  doc["id"] = askId;
+  JsonArray answers = doc["answers"].to<JsonArray>();
+  for (int i = 0; i < askQCount; ++i) {
+    JsonObject a = answers.add<JsonObject>();
     if (askMultiSelect) {
-      n += snprintf(buf + n, sizeof(buf) - n, "{\"labels\":[");
-      bool first = true;
+      JsonArray labels = a["labels"].to<JsonArray>();
       for (int o = 0; o < askQs[i].optCount; ++o) {
-        if (askQs[i].selected & (1 << o)) {
-          if (!first) n += snprintf(buf + n, sizeof(buf) - n, ",");
-          n += snprintf(buf + n, sizeof(buf) - n, "\"%s\"", askQs[i].opts[o].label);
-          first = false;
-        }
+        if (askQs[i].selected & (1 << o)) labels.add(askQs[i].opts[o].label);
       }
-      n += snprintf(buf + n, sizeof(buf) - n, "]}");
     } else {
       int oi = askQs[i].single;
-      const char* lbl = (oi >= 0 && oi < askQs[i].optCount)
-                        ? askQs[i].opts[oi].label : "";
-      n += snprintf(buf + n, sizeof(buf) - n, "{\"label\":\"%s\"}", lbl);
+      a["label"] = (oi >= 0 && oi < askQs[i].optCount)
+                   ? askQs[i].opts[oi].label : "";
     }
   }
-  snprintf(buf + n, sizeof(buf) - n, "]}\n");
+  char buf[1536];  // headroom for fully-escaped labels (4 questions x 4 opts)
+  size_t len = serializeJson(doc, buf, sizeof(buf) - 2);
+  buf[len++] = '\n';
+  buf[len] = '\0';
   sendNotify(buf);
 
   // "Sent ✓" splash for 1s
@@ -299,9 +297,24 @@ class ServerCallbacks : public BLEServerCallbacks {
 };
 
 class RxCallbacks : public BLECharacteristicCallbacks {
+  std::string rxBuf_;  // reassembly buffer for fragmented BLE writes
+
   void onWrite(BLECharacteristic* c) override {
     std::string v = c->getValue();
     if (v.empty()) return;
+    rxBuf_ += v;
+    if (rxBuf_.size() > 8192) { rxBuf_.clear(); return; }  // overflow guard
+    // The bridge chunks large writes; every message is newline-terminated.
+    // Process each complete line; keep any trailing partial in the buffer.
+    size_t nl;
+    while ((nl = rxBuf_.find('\n')) != std::string::npos) {
+      std::string line = rxBuf_.substr(0, nl);
+      rxBuf_.erase(0, nl + 1);
+      if (!line.empty()) processLine(line);
+    }
+  }
+
+  void processLine(const std::string& v) {
     Serial.print("[rx] ");
     Serial.write(reinterpret_cast<const uint8_t*>(v.data()), v.size());
     Serial.println();
@@ -492,10 +505,23 @@ void setup() {
 }
 
 // Send a JSON string as a NUS TX notification to the central.
+// Conservative BLE payload chunk. macOS negotiates an ATT MTU >= 185, so 150
+// always fits one packet; the bridge reassembles notifications by newline, so
+// the exact chunk size does not need to match the write side.
+static const size_t BLE_CHUNK = 150;
+
 static void sendNotify(const char* json) {
   if (txChar == nullptr || !centralConnected) return;
-  txChar->setValue((uint8_t*)json, strlen(json));
-  txChar->notify();
+  size_t total = strlen(json);
+  size_t off = 0;
+  do {
+    size_t n = total - off;
+    if (n > BLE_CHUNK) n = BLE_CHUNK;
+    txChar->setValue((uint8_t*)(json + off), n);
+    txChar->notify();
+    off += n;
+    if (off < total) delay(8);  // let the central drain between chunks
+  } while (off < total);
 }
 
 // Send the button decision back to the bridge, then clear the prompt state
@@ -620,9 +646,6 @@ void loop() {
         }
       }
     }
-    // Reset long-press flags on release so the next press is fresh.
-    if (M5.BtnA.wasReleased()) aLongFired = false;
-    if (M5.BtnB.wasReleased()) bLongFired = false;
   } else if (promptId[0] != 0 && M5.BtnA.wasPressed()) {
     sendDecision("allow");
   } else if (promptId[0] != 0 && M5.BtnC.wasPressed()) {
@@ -630,5 +653,10 @@ void loop() {
   } else if (M5.BtnB.wasPressed()) {
     toggleAuto();
   }
+  // Reset long-press flags on release regardless of ask state. A long-press
+  // that cleared the ask (cancel / submit) must not leak a stale "fired" flag
+  // into the next ask, where it would swallow the first short-press.
+  if (M5.BtnA.wasReleased()) aLongFired = false;
+  if (M5.BtnB.wasReleased()) bLongFired = false;
   delay(20);
 }

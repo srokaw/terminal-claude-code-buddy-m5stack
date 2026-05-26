@@ -21,9 +21,9 @@ import uuid
 
 # Cross-process contract: must match bridge/buddy_bridge/__main__.py.
 SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
-# DECISION_TIMEOUT must stay below the `timeout` set on the PermissionRequest
-# hook entry in ~/.claude/settings.json (currently 60 s) so that Claude Code's
-# SIGTERM-cancel relationship holds.
+# DECISION_TIMEOUT and ASK_TIMEOUT must stay below the `timeout` set on the
+# PermissionRequest hook entry in ~/.claude/settings.json (currently 90 s) so
+# that Claude Code's SIGTERM-cancel relationship holds.
 DECISION_TIMEOUT = 45.0  # seconds to wait for a buddy button press
 ASK_TIMEOUT = 60.0  # seconds — asks can have multiple questions; allow more.
 
