@@ -195,7 +195,7 @@ static void renderAsk() {
     M5.Display.setTextSize(2);
     M5.Display.setCursor(8, rowYs[r]);
     const char* sel = "";
-    if (askMultiSelect && (q.selected & (1 << oi))) sel = "[•] ";
+    if (askMultiSelect && (q.selected & (1 << oi))) sel = "[x] ";
     M5.Display.printf("%c: %s%s", letters[r], sel, q.opts[oi].label);
     M5.Display.setTextSize(1);
     M5.Display.setCursor(28, rowYs[r] + 18);
