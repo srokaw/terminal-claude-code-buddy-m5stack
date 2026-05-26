@@ -101,3 +101,60 @@ async def test_queue_full_busy_rejects_when_depth_exceeded():
     for x in ["a", "b", "c", "d"]:
         b.resolve(x, "allow")
         await asyncio.sleep(0)
+
+
+class FakeLoopTimers:
+    """Capture call_later callbacks so tests can fire them deterministically."""
+    def __init__(self, real_loop):
+        self._real = real_loop
+        self.timers = []
+    def call_later(self, delay, cb, *args):
+        handle = self._real.call_later(1e9, lambda: None)  # never auto-fires
+        self.timers.append((delay, cb, args, handle))
+        return handle
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_fires_only_as_backstop(monkeypatch):
+    sends = []
+    b = make_broker(sends)
+    real = asyncio.get_running_loop()
+    fake = FakeLoopTimers(real)
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake)
+    t1 = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    t2 = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    # One watchdog armed for the active entry "a".
+    assert len(fake.timers) == 1
+    delay, cb, args, _ = fake.timers[0]
+    assert delay == 30.0 + 2.0  # BINARY_TIMEOUT + WATCHDOG_MARGIN
+    # Fire it: presumes "a" dead -> clears + promotes "b".
+    cb(*args)
+    assert await t1 is None
+    await asyncio.sleep(0)
+    assert ("cancel", "a") in sends and ("prompt", "b") in sends
+    assert b.active_id == "b"
+    b.resolve("b", "allow"); await t2
+
+
+@pytest.mark.asyncio
+async def test_stale_watchdog_does_not_pull_new_entry(monkeypatch):
+    sends = []
+    b = make_broker(sends)
+    real = asyncio.get_running_loop()
+    fake = FakeLoopTimers(real)
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake)
+    t1 = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    t2 = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    a_delay, a_cb, a_args, _ = fake.timers[0]   # watchdog for "a"
+    b.resolve("a", "allow")                      # real signal resolves "a"
+    await t1; await asyncio.sleep(0)
+    assert b.active_id == "b"
+    # Now fire the STALE "a" watchdog: must be a no-op, not touch "b".
+    a_cb(*a_args)
+    assert not t2.done()
+    assert b.active_id == "b"
+    b.resolve("b", "allow"); await t2
