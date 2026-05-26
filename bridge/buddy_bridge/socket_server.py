@@ -41,7 +41,8 @@ async def _handle_permission(reader, writer, broker, event) -> None:
 
     req_task = asyncio.create_task(broker.request(
         pid, event.get("tool", ""), event.get("detail", ""),
-        event.get("change"), send_active=send_active))
+        event.get("change"), send_active=send_active,
+        session=event.get("session", "")))
     read_task = asyncio.create_task(reader.readline())
     while True:
         done, _ = await asyncio.wait(
@@ -91,7 +92,8 @@ async def _handle_ask(reader, writer, broker, event) -> None:
             pass
 
     req_task = asyncio.create_task(
-        broker.ask(aid, multi, questions, send_active=send_active))
+        broker.ask(aid, multi, questions, send_active=send_active,
+                   session=event.get("session", "")))
     read_task = asyncio.create_task(reader.readline())
     while True:
         done, _ = await asyncio.wait(

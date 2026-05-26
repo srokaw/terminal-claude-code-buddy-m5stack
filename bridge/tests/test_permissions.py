@@ -26,7 +26,7 @@ async def test_request_sends_prompt_and_awaits_resolve():
     broker, sent, _ = make_broker()
     task = asyncio.create_task(broker.request("p1", "Bash", "ls -la", None))
     await asyncio.sleep(0.05)
-    assert sent == [("p1", "Bash", "ls -la", None)]
+    assert sent == [("p1", "Bash", "ls -la", None, "")]
     broker.resolve("p1", "deny")
     assert await task == "deny"
 
@@ -78,7 +78,7 @@ async def test_ask_request_resolves_with_answers():
     broker = PermissionBroker(
         send_prompt=lambda *a: None,
         send_cancel=lambda *a: None,
-        send_ask=lambda pid, ms, qs: sent.append(("ask", pid, ms, qs)),
+        send_ask=lambda pid, ms, qs, session="": sent.append(("ask", pid, ms, qs)),
         send_ask_cancel=lambda pid: sent.append(("cancel", pid)))
     task = asyncio.create_task(broker.ask("askid",
         multi_select=False,

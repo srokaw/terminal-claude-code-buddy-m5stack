@@ -6,10 +6,10 @@ from buddy_bridge.permissions import PermissionBroker
 def make_broker(sends):
     """Broker whose device-sends append (kind, id) to `sends`; link always connected."""
     return PermissionBroker(
-        send_prompt=lambda pid, tool, detail, change: sends.append(("prompt", pid)),
+        send_prompt=lambda pid, tool, detail, change, session="": sends.append(("prompt", pid)),
         send_cancel=lambda pid: sends.append(("cancel", pid)),
         send_auto_fired=lambda tool: sends.append(("auto_fired", tool)),
-        send_ask=lambda aid, multi, qs: sends.append(("ask", aid)),
+        send_ask=lambda aid, multi, qs, session="": sends.append(("ask", aid)),
         send_ask_cancel=lambda aid: sends.append(("ask_cancel", aid)),
         link_connected=lambda: True,
     )
@@ -218,9 +218,9 @@ async def test_promote_with_link_down_fails_to_terminal():
     sends = []
     connected = {"v": False}
     b = PermissionBroker(
-        send_prompt=lambda pid, tool, detail, change: sends.append(("prompt", pid)),
+        send_prompt=lambda pid, tool, detail, change, session="": sends.append(("prompt", pid)),
         send_cancel=lambda pid: sends.append(("cancel", pid)),
-        send_ask=lambda aid, m, q: sends.append(("ask", aid)),
+        send_ask=lambda aid, m, q, session="": sends.append(("ask", aid)),
         send_ask_cancel=lambda aid: sends.append(("ask_cancel", aid)),
         link_connected=lambda: connected["v"],
     )
@@ -235,7 +235,7 @@ async def test_link_down_skips_to_next_connected_entry():
     sends = []
     connected = {"v": True}
     b = PermissionBroker(
-        send_prompt=lambda pid, tool, detail, change: sends.append(("prompt", pid)),
+        send_prompt=lambda pid, tool, detail, change, session="": sends.append(("prompt", pid)),
         send_cancel=lambda pid: sends.append(("cancel", pid)),
         link_connected=lambda: connected["v"],
     )

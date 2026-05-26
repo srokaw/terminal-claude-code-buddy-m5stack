@@ -65,7 +65,8 @@ class PermissionBroker:
     # ----- request entry points -----
     async def request(self, prompt_id: str, tool: str, detail: str,
                       change: Optional[str],
-                      send_active: Optional[Callable[[], None]] = None) -> Optional[str]:
+                      send_active: Optional[Callable[[], None]] = None,
+                      session: str = "") -> Optional[str]:
         if self._auto_approve:
             if self._send_auto_fired is not None:
                 self._send_auto_fired(tool)
@@ -74,7 +75,7 @@ class PermissionBroker:
         fut = loop.create_future()
         entry = Entry(
             id=prompt_id, family="permission", fut=fut,
-            send_device=lambda: self._send_prompt(prompt_id, tool, detail, change),
+            send_device=lambda: self._send_prompt(prompt_id, tool, detail, change, session),
             send_cancel=lambda: self._send_cancel(prompt_id),
             send_active=send_active,
         )
@@ -86,13 +87,14 @@ class PermissionBroker:
             self._entries.pop(prompt_id, None)
 
     async def ask(self, ask_id: str, multi_select: bool, questions: list,
-                  send_active: Optional[Callable[[], None]] = None) -> Optional[list]:
+                  send_active: Optional[Callable[[], None]] = None,
+                  session: str = "") -> Optional[list]:
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         entry = Entry(
             id=ask_id, family="ask", fut=fut,
             send_device=lambda: (self._send_ask and
-                                 self._send_ask(ask_id, multi_select, questions)),
+                                 self._send_ask(ask_id, multi_select, questions, session)),
             send_cancel=lambda: (self._send_ask_cancel and
                                  self._send_ask_cancel(ask_id)),
             send_active=send_active,

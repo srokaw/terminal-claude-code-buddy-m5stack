@@ -267,7 +267,7 @@ async def test_ask_request_round_trip(tmp_path):
     sent_ask = []
     broker = PermissionBroker(
         send_prompt=lambda *a: None, send_cancel=lambda *a: None,
-        send_ask=lambda pid, ms, qs: sent_ask.append((pid, ms, qs)),
+        send_ask=lambda pid, ms, qs, session="": sent_ask.append((pid, ms, qs)),
         send_ask_cancel=lambda *a: None)
     server = await serve(sock, reg, on_change=lambda: None, broker=broker)
     try:
