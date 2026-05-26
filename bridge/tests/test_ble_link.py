@@ -1,4 +1,4 @@
-from buddy_bridge.ble_link import chunk_payload, BLE_CHUNK
+from buddy_bridge.ble_link import chunk_payload, BLE_CHUNK, BleLink
 
 
 def test_small_payload_is_single_chunk():
@@ -26,3 +26,15 @@ def test_split_preserves_newline_terminator():
     chunks = chunk_payload(p)
     assert b"".join(chunks) == p
     assert chunks[-1].endswith(b"\n")
+
+
+def test_on_connect_callback_stored():
+    called = []
+    link = BleLink(on_connect=lambda: called.append(True))
+    link._fire_connect()
+    assert called == [True]
+
+
+def test_on_connect_optional():
+    link = BleLink()
+    link._fire_connect()  # must not raise when no callback set
