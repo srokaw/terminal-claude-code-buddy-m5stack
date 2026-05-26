@@ -231,6 +231,7 @@ static void renderAsk() {
 
 static void askClear() {
   askId[0] = 0;
+  askSession[0] = 0;
   askQCount = 0;
   askCurQ = askPage = 0;
   askMultiSelect = false;
@@ -309,7 +310,8 @@ class ServerCallbacks : public BLEServerCallbacks {
     // the device would hold a stale id and busy-reject the bridge's resend
     // (livelock). The bridge re-sends the active prompt on reconnect.
     promptId[0] = 0;
-    askClear();   // clears askId + ask question state
+    promptSession[0] = 0;
+    askClear();   // clears askId + ask question state (incl. askSession)
     renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
     Serial.println("[ble] central disconnected -- cleared prompt, re-advertising");
     s->getAdvertising()->start();
@@ -374,6 +376,7 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     } else if (doc["cmd"] == "prompt_cancel") {
       if (strcmp(doc["id"] | "", promptId) == 0) {
         promptId[0] = 0;
+        promptSession[0] = 0;
         renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     } else if (doc["cmd"] == "get_auto") {
