@@ -43,6 +43,30 @@ static char lastStatusMsg[64] = "idle";
 static int autoCount = 0;
 static unsigned long autoFlashUntil = 0;  // millis() deadline for green toast
 
+// ----- AskUserQuestion screen state -----
+static char askId[48] = {0};                 // empty == no ask in flight
+static bool askMultiSelect = false;
+static int  askQCount = 0;                   // number of questions, 1..4
+static int  askCurQ   = 0;                   // 0..askQCount-1
+static int  askPage   = 0;                   // 0 for 2-3 opts; 0/1 for 4 opts
+
+struct AskOption {
+  char label[28];
+  char desc[40];
+};
+struct AskQuestion {
+  char text[64];
+  AskOption opts[4];
+  int        optCount;
+  uint8_t    selected;                       // bitmask for multi-select
+  int        single;                         // -1 or index for single-select
+};
+static AskQuestion askQs[4];
+
+static unsigned long btnAPressMs = 0;        // long-press tracking
+static unsigned long btnBPressMs = 0;
+static const unsigned long LONG_PRESS_MS = 800;
+
 // Renders the live status screen. Phase 1 shows counts only — no message
 // text or transcript content ever reaches the device.
 static void renderStatus(int running, int waiting, int total,
@@ -85,6 +109,10 @@ static void renderStatus(int running, int waiting, int total,
 static void sendNotify(const char* json);
 static void sendDecision(const char* decision);
 static void toggleAuto();
+static void renderAsk();
+static void askSendAnswers();
+static void askCancel();
+static void askAdvance();
 
 // Permission-takeover screen: navy background, tool + detail + optional change
 // size (e.g. "+3/-1 lines" for Edit/Write), and button hints.
@@ -111,6 +139,150 @@ static void renderPrompt(const char* tool, const char* detail,
   M5.Display.setTextColor(TFT_RED, TFT_NAVY);
   M5.Display.setCursor(180, 210);
   M5.Display.print("[C] Deny");
+}
+
+static void renderAsk() {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setTextSize(2);
+
+  // Header: question text (wrapped) and Q n/m chip.
+  M5.Display.setCursor(8, 8);
+  M5.Display.setTextWrap(true);
+  M5.Display.print(askQs[askCurQ].text);
+  if (askQCount > 1) {
+    char chip[10];
+    snprintf(chip, sizeof(chip), "Q %d/%d", askCurQ + 1, askQCount);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(264, 8);
+    M5.Display.print(chip);
+  }
+
+  // Body: A/B/C rows. For 4 options, paged.
+  const AskQuestion& q = askQs[askCurQ];
+  int rows[3] = {-1, -1, -1};                // which option each row shows
+  bool moreRow = false;                      // C = "More >>" / "<< Back"
+  if (q.optCount <= 2) {
+    rows[0] = 0; rows[2] = q.optCount > 1 ? 1 : -1;   // A and C only
+  } else if (q.optCount == 3) {
+    rows[0] = 0; rows[1] = 1; rows[2] = 2;
+  } else {
+    if (askPage == 0) { rows[0] = 0; rows[1] = 1; moreRow = true; }
+    else              { rows[0] = 2; rows[1] = 3; moreRow = true; }
+  }
+
+  const int rowYs[3] = {64, 116, 168};
+  const char letters[3] = {'A', 'B', 'C'};
+  const uint16_t tints[3] = {TFT_DARKGREEN, TFT_BLACK, TFT_MAROON};
+  for (int r = 0; r < 3; ++r) {
+    int oi = rows[r];
+    if (r == 2 && moreRow) {
+      M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+      M5.Display.setTextSize(2);
+      M5.Display.setCursor(8, rowYs[r] + 6);
+      M5.Display.print(askPage == 0 ? "C: More >>" : "C: << Back");
+      continue;
+    }
+    if (oi < 0) continue;
+    // Tint background strip so A=greenish, C=redish (spatial habit).
+    if (tints[r] != TFT_BLACK) {
+      M5.Display.fillRect(0, rowYs[r] - 4, 320, 44, tints[r]);
+      M5.Display.setTextColor(TFT_WHITE, tints[r]);
+    } else {
+      M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    }
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(8, rowYs[r]);
+    const char* sel = "";
+    if (askMultiSelect && (q.selected & (1 << oi))) sel = "[•] ";
+    M5.Display.printf("%c: %s%s", letters[r], sel, q.opts[oi].label);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(28, rowYs[r] + 18);
+    M5.Display.print(q.opts[oi].desc);
+  }
+
+  if (askMultiSelect) {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setCursor(8, 228);
+    M5.Display.print("B-long = submit  |  A-long = answer on laptop");
+  } else {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setCursor(8, 228);
+    M5.Display.print("A-long = answer on laptop");
+  }
+}
+
+static void askClear() {
+  askId[0] = 0;
+  askQCount = 0;
+  askCurQ = askPage = 0;
+  askMultiSelect = false;
+  for (int i = 0; i < 4; ++i) {
+    askQs[i].selected = 0;
+    askQs[i].single = -1;
+  }
+}
+
+static void askSendAnswers() {
+  // Build {"cmd":"ask_answer","id":"<id>","answers":[ ... ]}\n
+  char buf[1024];
+  int n = snprintf(buf, sizeof(buf),
+                   "{\"cmd\":\"ask_answer\",\"id\":\"%s\",\"answers\":[", askId);
+  for (int i = 0; i < askQCount && n < (int)sizeof(buf) - 4; ++i) {
+    if (i > 0) n += snprintf(buf + n, sizeof(buf) - n, ",");
+    if (askMultiSelect) {
+      n += snprintf(buf + n, sizeof(buf) - n, "{\"labels\":[");
+      bool first = true;
+      for (int o = 0; o < askQs[i].optCount; ++o) {
+        if (askQs[i].selected & (1 << o)) {
+          if (!first) n += snprintf(buf + n, sizeof(buf) - n, ",");
+          n += snprintf(buf + n, sizeof(buf) - n, "\"%s\"", askQs[i].opts[o].label);
+          first = false;
+        }
+      }
+      n += snprintf(buf + n, sizeof(buf) - n, "]}");
+    } else {
+      int oi = askQs[i].single;
+      const char* lbl = (oi >= 0 && oi < askQs[i].optCount)
+                        ? askQs[i].opts[oi].label : "";
+      n += snprintf(buf + n, sizeof(buf) - n, "{\"label\":\"%s\"}", lbl);
+    }
+  }
+  snprintf(buf + n, sizeof(buf) - n, "]}\n");
+  sendNotify(buf);
+
+  // "Sent ✓" splash for 1s
+  M5.Display.fillScreen(TFT_DARKGREEN);
+  M5.Display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+  M5.Display.setTextSize(3);
+  M5.Display.setCursor(80, 100);
+  M5.Display.print("Sent");
+  delay(1000);
+
+  askClear();
+  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+}
+
+static void askCancel() {
+  char buf[80];
+  snprintf(buf, sizeof(buf), "{\"cmd\":\"ask_cancel\",\"id\":\"%s\"}\n", askId);
+  sendNotify(buf);
+  askClear();
+  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+}
+
+static void askAdvance() {
+  // Move to next question, or submit if we just answered the last one.
+  if (askCurQ + 1 < askQCount) {
+    askCurQ++;
+    askPage = 0;
+    renderAsk();
+  } else {
+    askSendAnswers();
+  }
 }
 
 class ServerCallbacks : public BLEServerCallbacks {
@@ -142,7 +314,7 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       lastWaiting = doc["waiting"] | 0;
       lastTotal   = doc["total"]   | 0;
       strlcpy(lastStatusMsg, doc["msg"] | "", sizeof(lastStatusMsg));
-      if (promptId[0] == 0) {
+      if (promptId[0] == 0 && askId[0] == 0) {
         renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     } else if (doc["evt"] == "prompt") {
@@ -188,6 +360,48 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         M5.Display.setTextSize(2);
         M5.Display.setCursor(8, 6);
         M5.Display.printf("AUTO ON · %d", autoCount);
+      }
+    }
+    else if (doc["evt"] == "ask") {
+      // Reject if a prompt or a different ask is already on screen.
+      const char* incomingId = doc["id"] | "";
+      if (promptId[0] != 0 || (askId[0] != 0 && strcmp(incomingId, askId) != 0)) {
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "{\"cmd\":\"prompt_busy\",\"id\":\"%s\"}\n", incomingId);
+        sendNotify(buf);
+        return;
+      }
+      askClear();
+      strlcpy(askId, incomingId, sizeof(askId));
+      askMultiSelect = doc["multiSelect"] | false;
+      JsonArray qs = doc["questions"].as<JsonArray>();
+      askQCount = 0;
+      for (JsonObject q : qs) {
+        if (askQCount >= 4) break;
+        AskQuestion& aq = askQs[askQCount];
+        strlcpy(aq.text, q["text"] | "", sizeof(aq.text));
+        aq.optCount = 0;
+        aq.selected = 0;
+        aq.single = -1;
+        JsonArray opts = q["options"].as<JsonArray>();
+        for (JsonObject op : opts) {
+          if (aq.optCount >= 4) break;
+          strlcpy(aq.opts[aq.optCount].label, op["label"] | "",
+                  sizeof(aq.opts[0].label));
+          strlcpy(aq.opts[aq.optCount].desc,  op["desc"]  | "",
+                  sizeof(aq.opts[0].desc));
+          aq.optCount++;
+        }
+        askQCount++;
+      }
+      askCurQ = askPage = 0;
+      renderAsk();
+    }
+    else if (doc["cmd"] == "ask_cancel") {
+      if (strcmp(doc["id"] | "", askId) == 0) {
+        askClear();
+        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     }
   }
@@ -345,8 +559,64 @@ void loop() {
     }
   }
 
-  if (promptId[0] != 0 && M5.BtnA.wasPressed())      { sendDecision("allow"); }
-  else if (promptId[0] != 0 && M5.BtnC.wasPressed()) { sendDecision("deny"); }
-  else if (M5.BtnB.wasPressed())                     { toggleAuto(); }
+  // Long-press tracking for A and B (used by ask mode).
+  if (M5.BtnA.isPressed()) {
+    if (btnAPressMs == 0) btnAPressMs = millis();
+  } else { btnAPressMs = 0; }
+  if (M5.BtnB.isPressed()) {
+    if (btnBPressMs == 0) btnBPressMs = millis();
+  } else { btnBPressMs = 0; }
+
+  if (askId[0] != 0) {
+    // Long-press A → cancel (answer on laptop).
+    if (btnAPressMs != 0 && (millis() - btnAPressMs) >= LONG_PRESS_MS) {
+      btnAPressMs = 0;
+      askCancel();
+    }
+    // Long-press B → multi-select submit.
+    else if (askMultiSelect && btnBPressMs != 0 &&
+             (millis() - btnBPressMs) >= LONG_PRESS_MS) {
+      btnBPressMs = 0;
+      askSendAnswers();
+    }
+    // Short presses on ask screen: A/B/C select the visible row.
+    // (Long-press paths above consume the press by zeroing btn[AB]PressMs and
+    // returning before the wasPressed check fires.)
+    if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed()) {
+      AskQuestion& q = askQs[askCurQ];
+      // Map button → visible row → option index, mirroring renderAsk().
+      int row = M5.BtnA.wasPressed() ? 0 : (M5.BtnB.wasPressed() ? 1 : 2);
+      int oi = -1;
+      bool moreRow = false;
+      if (q.optCount <= 2) {
+        if (row == 0) oi = 0;
+        else if (row == 2 && q.optCount > 1) oi = 1;
+      } else if (q.optCount == 3) {
+        oi = row;
+      } else {  // 4 options, paged
+        if (row == 2) { moreRow = true; }
+        else if (askPage == 0) { oi = row; }
+        else                   { oi = 2 + row; }
+      }
+      if (moreRow) {
+        askPage = 1 - askPage;
+        renderAsk();
+      } else if (oi >= 0) {
+        if (askMultiSelect) {
+          q.selected ^= (1 << oi);
+          renderAsk();                   // re-render to update [•] marker
+        } else {
+          q.single = oi;
+          askAdvance();                  // auto-advance / submit
+        }
+      }
+    }
+  } else if (promptId[0] != 0 && M5.BtnA.wasPressed()) {
+    sendDecision("allow");
+  } else if (promptId[0] != 0 && M5.BtnC.wasPressed()) {
+    sendDecision("deny");
+  } else if (M5.BtnB.wasPressed()) {
+    toggleAuto();
+  }
   delay(20);
 }
