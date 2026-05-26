@@ -126,6 +126,16 @@ class PermissionBroker:
 
     def set_auto_approve(self, state: bool) -> None:
         self._auto_approve = state
+        if state:
+            self._drain_for_auto()
+
+    def _drain_for_auto(self) -> None:
+        """AUTO turned on: resolve all pending PERMISSION entries as allow.
+        Asks are not auto-answerable and are left untouched (an active ask stays
+        on screen; its queued successors that are permissions still drain)."""
+        for e in list(self._entries.values()):
+            if e.family == "permission":
+                self._settle(e, "allow", send_cancel=(self._active is e))
 
     def on_busy(self, prompt_id: str) -> None:
         """Device reported it is busy for this id. Only meaningful for the

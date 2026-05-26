@@ -248,3 +248,33 @@ async def test_link_down_skips_to_next_connected_entry():
     assert await t1 is None
     assert await t2 is None         # b also fails to terminal (link down)
     assert b.active_id is None
+
+
+@pytest.mark.asyncio
+async def test_auto_on_drains_permission_backlog():
+    sends = []
+    b = make_broker(sends)
+    ta = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    tb = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    b.set_auto_approve(True)
+    assert await ta == "allow"
+    assert await tb == "allow"
+    assert b.active_id is None and b.queue_ids == []
+    # Active "a" was on screen -> device told to clear it.
+    assert ("cancel", "a") in sends
+
+
+@pytest.mark.asyncio
+async def test_auto_on_leaves_active_ask_but_drains_queued_binary():
+    sends = []
+    b = make_broker(sends)
+    tq = asyncio.create_task(b.ask("q", False, [{"text": "?", "options": []}]))
+    await asyncio.sleep(0)                # ask "q" is active
+    tb = asyncio.create_task(b.request("b", "Bash", "pwd", None))  # queued binary
+    await asyncio.sleep(0)
+    b.set_auto_approve(True)
+    assert await tb == "allow"            # queued binary drained
+    assert not tq.done()                  # active ask untouched
+    assert b.active_id == "q" and b.queue_ids == []
+    b.resolve_ask("q", [{"label": "x"}]); await tq
