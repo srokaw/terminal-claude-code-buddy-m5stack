@@ -127,6 +127,24 @@ class PermissionBroker:
     def set_auto_approve(self, state: bool) -> None:
         self._auto_approve = state
 
+    def on_busy(self, prompt_id: str) -> None:
+        """Device reported it is busy for this id. Only meaningful for the
+        active entry (a queued entry was never sent). Bounded resend; after the
+        bound, fail the active entry to terminal rather than looping forever."""
+        e = self._entries.get(prompt_id)
+        if e is None or self._active is not e:
+            return
+        e.resend_count += 1
+        if e.resend_count > MAX_RESENDS:
+            self._settle(e, None, send_cancel=False)
+        elif self._link_connected():
+            e.send_device()
+
+    def resend_active(self) -> None:
+        """Re-send the on-screen entry to the device (e.g. after BLE reconnect)."""
+        if self._active is not None and self._link_connected():
+            self._active.send_device()
+
     # ----- internal: synchronous queue mechanics -----
     def _admit(self, entry: Entry) -> None:
         self._entries[entry.id] = entry

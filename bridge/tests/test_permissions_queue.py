@@ -158,3 +158,56 @@ async def test_stale_watchdog_does_not_pull_new_entry(monkeypatch):
     assert not t2.done()
     assert b.active_id == "b"
     b.resolve("b", "allow"); await t2
+
+
+@pytest.mark.asyncio
+async def test_on_busy_for_active_resends_then_fails_after_bound():
+    sends = []
+    b = make_broker(sends)
+    t = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    await asyncio.sleep(0)
+    assert sends.count(("prompt", "a")) == 1
+    for _ in range(3):           # MAX_RESENDS resends
+        b.on_busy("a")
+    assert sends.count(("prompt", "a")) == 4   # initial + 3 resends
+    assert not t.done()
+    b.on_busy("a")               # exceeds bound -> fail to terminal
+    assert await t is None
+    assert b.active_id is None
+
+
+@pytest.mark.asyncio
+async def test_on_busy_for_non_active_is_noop():
+    sends = []
+    b = make_broker(sends)
+    t1 = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    t2 = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    before = list(sends)
+    b.on_busy("b")               # queued id -> no-op
+    b.on_busy("zzz")             # unknown id -> no-op
+    assert sends == before
+    assert not t1.done() and not t2.done()
+    b.resolve("a", "allow"); await t1
+    await asyncio.sleep(0)
+    b.resolve("b", "allow"); await t2
+
+
+@pytest.mark.asyncio
+async def test_resend_active_resends_current():
+    sends = []
+    b = make_broker(sends)
+    t = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    await asyncio.sleep(0)
+    sends.clear()
+    b.resend_active()
+    assert sends == [("prompt", "a")]
+    b.resolve("a", "allow"); await t
+
+
+@pytest.mark.asyncio
+async def test_resend_active_noop_when_idle():
+    sends = []
+    b = make_broker(sends)
+    b.resend_active()
+    assert sends == []
