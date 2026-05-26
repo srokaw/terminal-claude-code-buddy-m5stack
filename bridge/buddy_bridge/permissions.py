@@ -132,8 +132,14 @@ class PermissionBroker:
     def _drain_for_auto(self) -> None:
         """AUTO turned on: resolve all pending PERMISSION entries as allow.
         Asks are not auto-answerable and are left untouched (an active ask stays
-        on screen; its queued successors that are permissions still drain)."""
-        for e in list(self._entries.values()):
+        on screen; its queued successors that are permissions still drain).
+
+        Queued entries are drained before the active one so that settling the
+        active entry never promotes a doomed entry mid-drain (which would cause
+        a spurious device send+cancel / on-screen flash)."""
+        # Active last: a False sort key (queued) sorts before True (active).
+        entries = sorted(self._entries.values(), key=lambda e: self._active is e)
+        for e in entries:
             if e.family == "permission":
                 self._settle(e, "allow", send_cancel=(self._active is e))
 

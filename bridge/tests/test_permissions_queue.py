@@ -266,6 +266,25 @@ async def test_auto_on_drains_permission_backlog():
 
 
 @pytest.mark.asyncio
+async def test_auto_drain_does_not_flash_queued_entry_on_device():
+    sends = []
+    b = make_broker(sends)
+    ta = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    tb = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    assert sends == [("prompt", "a")]      # only the active "a" was ever sent
+    b.set_auto_approve(True)
+    assert await ta == "allow"
+    assert await tb == "allow"
+    # "b" must NEVER have been sent to the device (no flash), nor cancelled.
+    assert ("prompt", "b") not in sends
+    assert ("cancel", "b") not in sends
+    # The active "a" was on screen, so it is cleared.
+    assert ("cancel", "a") in sends
+    assert b.active_id is None and b.queue_ids == []
+
+
+@pytest.mark.asyncio
 async def test_auto_on_leaves_active_ask_but_drains_queued_binary():
     sends = []
     b = make_broker(sends)
