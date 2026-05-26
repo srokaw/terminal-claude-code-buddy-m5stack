@@ -211,3 +211,40 @@ async def test_resend_active_noop_when_idle():
     b = make_broker(sends)
     b.resend_active()
     assert sends == []
+
+
+@pytest.mark.asyncio
+async def test_promote_with_link_down_fails_to_terminal():
+    sends = []
+    connected = {"v": False}
+    b = PermissionBroker(
+        send_prompt=lambda pid, tool, detail, change: sends.append(("prompt", pid)),
+        send_cancel=lambda pid: sends.append(("cancel", pid)),
+        send_ask=lambda aid, m, q: sends.append(("ask", aid)),
+        send_ask_cancel=lambda aid: sends.append(("ask_cancel", aid)),
+        link_connected=lambda: connected["v"],
+    )
+    t = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    assert await t is None          # link down -> immediate terminal fallback
+    assert sends == []              # nothing sent to the device
+    assert b.active_id is None
+
+
+@pytest.mark.asyncio
+async def test_link_down_skips_to_next_connected_entry():
+    sends = []
+    connected = {"v": True}
+    b = PermissionBroker(
+        send_prompt=lambda pid, tool, detail, change: sends.append(("prompt", pid)),
+        send_cancel=lambda pid: sends.append(("cancel", pid)),
+        link_connected=lambda: connected["v"],
+    )
+    t1 = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    t2 = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    assert b.active_id == "a"
+    connected["v"] = False
+    b.cancel("a")                   # clears a; tries to promote b but link down
+    assert await t1 is None
+    assert await t2 is None         # b also fails to terminal (link down)
+    assert b.active_id is None
