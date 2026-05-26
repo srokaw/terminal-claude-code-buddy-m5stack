@@ -19,15 +19,18 @@ def encode_status(running: int, waiting: int, total: int, msg: str) -> bytes:
 
 
 def encode_prompt(prompt_id: str, tool: str, detail: str,
-                  change: str | None = None) -> bytes:
+                  change: str | None = None, session: str = "") -> bytes:
     """Encode a pending permission prompt for the device.
 
-    `detail` is the complete tool call (full command / path / URL). Never
-    file contents or diff bodies — see the spec's Privacy section.
+    `detail` is the complete tool call (full command / path / URL). `session`
+    is a short id for an on-screen origin hint. Never file contents or diff
+    bodies — see the spec's Privacy section.
     """
     obj = {"evt": "prompt", "id": prompt_id, "tool": tool, "detail": detail}
     if change is not None:
         obj["change"] = change
+    if session:
+        obj["session"] = session
     return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
 
 
@@ -49,17 +52,19 @@ def encode_get_auto() -> bytes:
 
 
 def encode_ask_request(prompt_id: str, multi_select: bool,
-                       questions: list) -> bytes:
+                       questions: list, session: str = "") -> bytes:
     """Encode an AskUserQuestion prompt for the device.
 
     `questions` is a list of `{"text": ..., "options": [{"label": ..., "desc": ...}, ...]}`
     dicts. Question text and option labels/descriptions go to the device verbatim
-    — the user is reading them to decide. Never any other tool input or
-    transcript content.
+    — the user is reading them to decide. `session` is a short session id used
+    only for an on-screen origin hint. Never any other tool input or transcript content.
     """
     obj = {"evt": "ask", "id": prompt_id,
            "multiSelect": multi_select,
            "questions": questions}
+    if session:
+        obj["session"] = session
     return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
 
 
