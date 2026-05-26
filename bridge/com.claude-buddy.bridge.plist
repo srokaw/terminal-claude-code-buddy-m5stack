@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd user agent for the Claude Buddy bridge.
+
+  This is a TEMPLATE. launchd does not expand `~` or environment variables in
+  these paths, so replace the two placeholders with absolute paths and copy the
+  result to ~/Library/LaunchAgents/. The README's "Run the bridge as a launchd
+  agent" section has a one-liner that does this for you.
+
+    __REPO_DIR__  ->  absolute path to your clone of this repo
+    __HOME__      ->  your home directory (output of `echo $HOME`)
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-buddy.bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO_DIR__/bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>buddy_bridge</string>
+    </array>
+
+    <!-- `-m buddy_bridge` resolves the package from cwd; pin it to bridge/. -->
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__/bridge</string>
+
+    <!-- Start at login. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart whenever the process exits (crash, BLE stack reset, etc.). -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Back off so a hard-failing bridge doesn't spin. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Unbuffered so the log shows lines as they happen, not on flush. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.claude-buddy/bridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.claude-buddy/bridge.log</string>
+</dict>
+</plist>
