@@ -32,8 +32,16 @@ async def _handle_permission(reader, writer, broker, event) -> None:
     resolved and the response is sent back.
     """
     pid = event.get("id", "")
+
+    def send_active() -> None:
+        try:
+            writer.write((json.dumps({"type": "active", "id": pid}) + "\n").encode())
+        except (ConnectionError, OSError):
+            pass
+
     req_task = asyncio.create_task(broker.request(
-        pid, event.get("tool", ""), event.get("detail", ""), event.get("change")))
+        pid, event.get("tool", ""), event.get("detail", ""),
+        event.get("change"), send_active=send_active))
     read_task = asyncio.create_task(reader.readline())
     while True:
         done, _ = await asyncio.wait(
@@ -75,7 +83,15 @@ async def _handle_ask(reader, writer, broker, event) -> None:
     aid = event.get("id", "")
     multi = bool(event.get("multiSelect", False))
     questions = event.get("questions", []) or []
-    req_task = asyncio.create_task(broker.ask(aid, multi, questions))
+
+    def send_active() -> None:
+        try:
+            writer.write((json.dumps({"type": "active", "id": aid}) + "\n").encode())
+        except (ConnectionError, OSError):
+            pass
+
+    req_task = asyncio.create_task(
+        broker.ask(aid, multi, questions, send_active=send_active))
     read_task = asyncio.create_task(reader.readline())
     while True:
         done, _ = await asyncio.wait(
