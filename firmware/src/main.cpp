@@ -43,6 +43,30 @@ static char lastStatusMsg[64] = "idle";
 static int autoCount = 0;
 static unsigned long autoFlashUntil = 0;  // millis() deadline for green toast
 
+// ----- AskUserQuestion screen state -----
+static char askId[48] = {0};                 // empty == no ask in flight
+static bool askMultiSelect = false;
+static int  askQCount = 0;                   // number of questions, 1..4
+static int  askCurQ   = 0;                   // 0..askQCount-1
+static int  askPage   = 0;                   // 0 for 2-3 opts; 0/1 for 4 opts
+
+struct AskOption {
+  char label[28];
+  char desc[40];
+};
+struct AskQuestion {
+  char text[64];
+  AskOption opts[4];
+  int        optCount;
+  uint8_t    selected;                       // bitmask for multi-select
+  int        single;                         // -1 or index for single-select
+};
+static AskQuestion askQs[4];
+
+static unsigned long btnAPressMs = 0;        // long-press tracking
+static unsigned long btnBPressMs = 0;
+static const unsigned long LONG_PRESS_MS = 800;
+
 // Renders the live status screen. Phase 1 shows counts only — no message
 // text or transcript content ever reaches the device.
 static void renderStatus(int running, int waiting, int total,
@@ -85,6 +109,10 @@ static void renderStatus(int running, int waiting, int total,
 static void sendNotify(const char* json);
 static void sendDecision(const char* decision);
 static void toggleAuto();
+static void renderAsk();
+static void askSendAnswers();
+static void askCancel();
+static void askAdvance();
 
 // Permission-takeover screen: navy background, tool + detail + optional change
 // size (e.g. "+3/-1 lines" for Edit/Write), and button hints.
@@ -113,6 +141,148 @@ static void renderPrompt(const char* tool, const char* detail,
   M5.Display.print("[C] Deny");
 }
 
+static void renderAsk() {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setTextSize(2);
+
+  // Header: question text (wrapped) and Q n/m chip.
+  M5.Display.setCursor(8, 8);
+  M5.Display.setTextWrap(true);
+  M5.Display.print(askQs[askCurQ].text);
+  if (askQCount > 1) {
+    char chip[10];
+    snprintf(chip, sizeof(chip), "Q %d/%d", askCurQ + 1, askQCount);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(264, 8);
+    M5.Display.print(chip);
+  }
+
+  // Body: A/B/C rows. For 4 options, paged.
+  const AskQuestion& q = askQs[askCurQ];
+  int rows[3] = {-1, -1, -1};                // which option each row shows
+  bool moreRow = false;                      // C = "More >>" / "<< Back"
+  if (q.optCount <= 2) {
+    rows[0] = 0; rows[2] = q.optCount > 1 ? 1 : -1;   // A and C only
+  } else if (q.optCount == 3) {
+    rows[0] = 0; rows[1] = 1; rows[2] = 2;
+  } else {
+    if (askPage == 0) { rows[0] = 0; rows[1] = 1; moreRow = true; }
+    else              { rows[0] = 2; rows[1] = 3; moreRow = true; }
+  }
+
+  const int rowYs[3] = {64, 116, 168};
+  const char letters[3] = {'A', 'B', 'C'};
+  const uint16_t tints[3] = {TFT_DARKGREEN, TFT_BLACK, TFT_MAROON};
+  for (int r = 0; r < 3; ++r) {
+    int oi = rows[r];
+    if (r == 2 && moreRow) {
+      M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+      M5.Display.setTextSize(2);
+      M5.Display.setCursor(8, rowYs[r] + 6);
+      M5.Display.print(askPage == 0 ? "C: More >>" : "C: << Back");
+      continue;
+    }
+    if (oi < 0) continue;
+    // Tint background strip so A=greenish, C=redish (spatial habit).
+    if (tints[r] != TFT_BLACK) {
+      M5.Display.fillRect(0, rowYs[r] - 4, 320, 44, tints[r]);
+      M5.Display.setTextColor(TFT_WHITE, tints[r]);
+    } else {
+      M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    }
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(8, rowYs[r]);
+    const char* sel = "";
+    if (askMultiSelect && (q.selected & (1 << oi))) sel = "[x] ";
+    M5.Display.printf("%c: %s%s", letters[r], sel, q.opts[oi].label);
+    M5.Display.setTextSize(1);
+    M5.Display.setCursor(28, rowYs[r] + 18);
+    M5.Display.print(q.opts[oi].desc);
+  }
+
+  if (askMultiSelect) {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setCursor(8, 228);
+    M5.Display.print("B-long = submit  |  A-long = answer on laptop");
+  } else {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setCursor(8, 228);
+    M5.Display.print("A-long = answer on laptop");
+  }
+}
+
+static void askClear() {
+  askId[0] = 0;
+  askQCount = 0;
+  askCurQ = askPage = 0;
+  askMultiSelect = false;
+  for (int i = 0; i < 4; ++i) {
+    askQs[i].selected = 0;
+    askQs[i].single = -1;
+  }
+}
+
+static void askSendAnswers() {
+  // Build {"cmd":"ask_answer","id":"<id>","answers":[ ... ]} with ArduinoJson
+  // so option labels containing quotes/backslashes are correctly escaped.
+  JsonDocument doc;
+  doc["cmd"] = "ask_answer";
+  doc["id"] = askId;
+  JsonArray answers = doc["answers"].to<JsonArray>();
+  for (int i = 0; i < askQCount; ++i) {
+    JsonObject a = answers.add<JsonObject>();
+    if (askMultiSelect) {
+      JsonArray labels = a["labels"].to<JsonArray>();
+      for (int o = 0; o < askQs[i].optCount; ++o) {
+        if (askQs[i].selected & (1 << o)) labels.add(askQs[i].opts[o].label);
+      }
+    } else {
+      int oi = askQs[i].single;
+      a["label"] = (oi >= 0 && oi < askQs[i].optCount)
+                   ? askQs[i].opts[oi].label : "";
+    }
+  }
+  char buf[1536];  // headroom for fully-escaped labels (4 questions x 4 opts)
+  size_t len = serializeJson(doc, buf, sizeof(buf) - 2);
+  buf[len++] = '\n';
+  buf[len] = '\0';
+  sendNotify(buf);
+
+  // "Sent ✓" splash for 1s
+  M5.Display.fillScreen(TFT_DARKGREEN);
+  M5.Display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
+  M5.Display.setTextSize(3);
+  M5.Display.setCursor(80, 100);
+  M5.Display.print("Sent");
+  delay(1000);
+
+  askClear();
+  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+}
+
+static void askCancel() {
+  char buf[80];
+  snprintf(buf, sizeof(buf), "{\"cmd\":\"ask_cancel\",\"id\":\"%s\"}\n", askId);
+  sendNotify(buf);
+  askClear();
+  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+}
+
+static void askAdvance() {
+  // Move to next question, or submit if we just answered the last one.
+  if (askCurQ + 1 < askQCount) {
+    askCurQ++;
+    askPage = 0;
+    renderAsk();
+  } else {
+    askSendAnswers();
+  }
+}
+
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer*) override {
     centralConnected = true;
@@ -127,9 +297,24 @@ class ServerCallbacks : public BLEServerCallbacks {
 };
 
 class RxCallbacks : public BLECharacteristicCallbacks {
+  std::string rxBuf_;  // reassembly buffer for fragmented BLE writes
+
   void onWrite(BLECharacteristic* c) override {
     std::string v = c->getValue();
     if (v.empty()) return;
+    rxBuf_ += v;
+    if (rxBuf_.size() > 8192) { rxBuf_.clear(); return; }  // overflow guard
+    // The bridge chunks large writes; every message is newline-terminated.
+    // Process each complete line; keep any trailing partial in the buffer.
+    size_t nl;
+    while ((nl = rxBuf_.find('\n')) != std::string::npos) {
+      std::string line = rxBuf_.substr(0, nl);
+      rxBuf_.erase(0, nl + 1);
+      if (!line.empty()) processLine(line);
+    }
+  }
+
+  void processLine(const std::string& v) {
     Serial.print("[rx] ");
     Serial.write(reinterpret_cast<const uint8_t*>(v.data()), v.size());
     Serial.println();
@@ -142,7 +327,7 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       lastWaiting = doc["waiting"] | 0;
       lastTotal   = doc["total"]   | 0;
       strlcpy(lastStatusMsg, doc["msg"] | "", sizeof(lastStatusMsg));
-      if (promptId[0] == 0) {
+      if (promptId[0] == 0 && askId[0] == 0) {
         renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     } else if (doc["evt"] == "prompt") {
@@ -188,6 +373,48 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         M5.Display.setTextSize(2);
         M5.Display.setCursor(8, 6);
         M5.Display.printf("AUTO ON · %d", autoCount);
+      }
+    }
+    else if (doc["evt"] == "ask") {
+      // Reject if a prompt or a different ask is already on screen.
+      const char* incomingId = doc["id"] | "";
+      if (promptId[0] != 0 || (askId[0] != 0 && strcmp(incomingId, askId) != 0)) {
+        char buf[80];
+        snprintf(buf, sizeof(buf),
+                 "{\"cmd\":\"prompt_busy\",\"id\":\"%s\"}\n", incomingId);
+        sendNotify(buf);
+        return;
+      }
+      askClear();
+      strlcpy(askId, incomingId, sizeof(askId));
+      askMultiSelect = doc["multiSelect"] | false;
+      JsonArray qs = doc["questions"].as<JsonArray>();
+      askQCount = 0;
+      for (JsonObject q : qs) {
+        if (askQCount >= 4) break;
+        AskQuestion& aq = askQs[askQCount];
+        strlcpy(aq.text, q["text"] | "", sizeof(aq.text));
+        aq.optCount = 0;
+        aq.selected = 0;
+        aq.single = -1;
+        JsonArray opts = q["options"].as<JsonArray>();
+        for (JsonObject op : opts) {
+          if (aq.optCount >= 4) break;
+          strlcpy(aq.opts[aq.optCount].label, op["label"] | "",
+                  sizeof(aq.opts[0].label));
+          strlcpy(aq.opts[aq.optCount].desc,  op["desc"]  | "",
+                  sizeof(aq.opts[0].desc));
+          aq.optCount++;
+        }
+        askQCount++;
+      }
+      askCurQ = askPage = 0;
+      renderAsk();
+    }
+    else if (doc["cmd"] == "ask_cancel") {
+      if (strcmp(doc["id"] | "", askId) == 0) {
+        askClear();
+        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     }
   }
@@ -278,10 +505,23 @@ void setup() {
 }
 
 // Send a JSON string as a NUS TX notification to the central.
+// Conservative BLE payload chunk. macOS negotiates an ATT MTU >= 185, so 150
+// always fits one packet; the bridge reassembles notifications by newline, so
+// the exact chunk size does not need to match the write side.
+static const size_t BLE_CHUNK = 150;
+
 static void sendNotify(const char* json) {
   if (txChar == nullptr || !centralConnected) return;
-  txChar->setValue((uint8_t*)json, strlen(json));
-  txChar->notify();
+  size_t total = strlen(json);
+  size_t off = 0;
+  do {
+    size_t n = total - off;
+    if (n > BLE_CHUNK) n = BLE_CHUNK;
+    txChar->setValue((uint8_t*)(json + off), n);
+    txChar->notify();
+    off += n;
+    if (off < total) delay(8);  // let the central drain between chunks
+  } while (off < total);
 }
 
 // Send the button decision back to the bridge, then clear the prompt state
@@ -345,8 +585,78 @@ void loop() {
     }
   }
 
-  if (promptId[0] != 0 && M5.BtnA.wasPressed())      { sendDecision("allow"); }
-  else if (promptId[0] != 0 && M5.BtnC.wasPressed()) { sendDecision("deny"); }
-  else if (M5.BtnB.wasPressed())                     { toggleAuto(); }
+  // --- Button handling ---------------------------------------------------
+  // Long-press tracking for A and B (used by ask mode). Long-press fires once
+  // while held; short-press fires on release only if no long-press fired.
+  static bool aLongFired = false;
+  static bool bLongFired = false;
+  const bool aHeld = M5.BtnA.isPressed();
+  const bool bHeld = M5.BtnB.isPressed();
+  if (aHeld) { if (btnAPressMs == 0) btnAPressMs = millis(); }
+  else       { btnAPressMs = 0; }
+  if (bHeld) { if (btnBPressMs == 0) btnBPressMs = millis(); }
+  else       { btnBPressMs = 0; }
+
+  if (askId[0] != 0) {
+    // Long-press A -> cancel (answer on laptop). Fires once per hold.
+    if (aHeld && !aLongFired && btnAPressMs != 0 &&
+        (millis() - btnAPressMs) >= LONG_PRESS_MS) {
+      aLongFired = true;
+      askCancel();
+    }
+    // Long-press B -> multi-select submit. Fires once per hold.
+    else if (askMultiSelect && bHeld && !bLongFired && btnBPressMs != 0 &&
+             (millis() - btnBPressMs) >= LONG_PRESS_MS) {
+      bLongFired = true;
+      askSendAnswers();
+    }
+
+    // Short-press = release before the long-press threshold. askCancel /
+    // askSendAnswers above may have cleared askId, so re-check.
+    if (askId[0] != 0) {
+      int row = -1;
+      if      (M5.BtnA.wasReleased()) { if (!aLongFired) row = 0; }
+      else if (M5.BtnB.wasReleased()) { if (!bLongFired) row = 1; }
+      else if (M5.BtnC.wasReleased()) { row = 2; }
+      if (row >= 0) {
+        AskQuestion& q = askQs[askCurQ];
+        int  oi = -1;
+        bool moreRow = false;
+        if (q.optCount <= 2) {
+          if (row == 0) oi = 0;
+          else if (row == 2 && q.optCount > 1) oi = 1;
+        } else if (q.optCount == 3) {
+          oi = row;
+        } else {  // 4 options, paged
+          if (row == 2) { moreRow = true; }
+          else if (askPage == 0) { oi = row; }
+          else                   { oi = 2 + row; }
+        }
+        if (moreRow) {
+          askPage = 1 - askPage;
+          renderAsk();
+        } else if (oi >= 0) {
+          if (askMultiSelect) {
+            q.selected ^= (1 << oi);
+            renderAsk();                 // re-render to update [•] marker
+          } else {
+            q.single = oi;
+            askAdvance();                // auto-advance / submit
+          }
+        }
+      }
+    }
+  } else if (promptId[0] != 0 && M5.BtnA.wasPressed()) {
+    sendDecision("allow");
+  } else if (promptId[0] != 0 && M5.BtnC.wasPressed()) {
+    sendDecision("deny");
+  } else if (M5.BtnB.wasPressed()) {
+    toggleAuto();
+  }
+  // Reset long-press flags on release regardless of ask state. A long-press
+  // that cleared the ask (cancel / submit) must not leak a stale "fired" flag
+  // into the next ask, where it would swallow the first short-press.
+  if (M5.BtnA.wasReleased()) aLongFired = false;
+  if (M5.BtnB.wasReleased()) bLongFired = false;
   delay(20);
 }

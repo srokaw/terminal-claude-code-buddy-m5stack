@@ -17,7 +17,7 @@
       {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-hook.py"}]}
     ],
     "PermissionRequest": [
-      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-permission-hook.py", "timeout": 60}]}
+      {"hooks": [{"type": "command", "command": "$HOME/terminal-claude-code-buddy-m5stack/hooks/buddy-permission-hook.py", "timeout": 90}]}
     ]
   }
 }
