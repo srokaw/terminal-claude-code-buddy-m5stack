@@ -559,58 +559,70 @@ void loop() {
     }
   }
 
-  // Long-press tracking for A and B (used by ask mode).
-  if (M5.BtnA.isPressed()) {
-    if (btnAPressMs == 0) btnAPressMs = millis();
-  } else { btnAPressMs = 0; }
-  if (M5.BtnB.isPressed()) {
-    if (btnBPressMs == 0) btnBPressMs = millis();
-  } else { btnBPressMs = 0; }
+  // --- Button handling ---------------------------------------------------
+  // Long-press tracking for A and B (used by ask mode). Long-press fires once
+  // while held; short-press fires on release only if no long-press fired.
+  static bool aLongFired = false;
+  static bool bLongFired = false;
+  const bool aHeld = M5.BtnA.isPressed();
+  const bool bHeld = M5.BtnB.isPressed();
+  if (aHeld) { if (btnAPressMs == 0) btnAPressMs = millis(); }
+  else       { btnAPressMs = 0; }
+  if (bHeld) { if (btnBPressMs == 0) btnBPressMs = millis(); }
+  else       { btnBPressMs = 0; }
 
   if (askId[0] != 0) {
-    // Long-press A → cancel (answer on laptop).
-    if (btnAPressMs != 0 && (millis() - btnAPressMs) >= LONG_PRESS_MS) {
-      btnAPressMs = 0;
+    // Long-press A -> cancel (answer on laptop). Fires once per hold.
+    if (aHeld && !aLongFired && btnAPressMs != 0 &&
+        (millis() - btnAPressMs) >= LONG_PRESS_MS) {
+      aLongFired = true;
       askCancel();
     }
-    // Long-press B → multi-select submit.
-    else if (askMultiSelect && btnBPressMs != 0 &&
+    // Long-press B -> multi-select submit. Fires once per hold.
+    else if (askMultiSelect && bHeld && !bLongFired && btnBPressMs != 0 &&
              (millis() - btnBPressMs) >= LONG_PRESS_MS) {
-      btnBPressMs = 0;
+      bLongFired = true;
       askSendAnswers();
     }
-    // Short presses on ask screen: A/B/C select the visible row.
-    // (Long-press paths above consume the press by zeroing btn[AB]PressMs and
-    // returning before the wasPressed check fires.)
-    if (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed()) {
-      AskQuestion& q = askQs[askCurQ];
-      // Map button → visible row → option index, mirroring renderAsk().
-      int row = M5.BtnA.wasPressed() ? 0 : (M5.BtnB.wasPressed() ? 1 : 2);
-      int oi = -1;
-      bool moreRow = false;
-      if (q.optCount <= 2) {
-        if (row == 0) oi = 0;
-        else if (row == 2 && q.optCount > 1) oi = 1;
-      } else if (q.optCount == 3) {
-        oi = row;
-      } else {  // 4 options, paged
-        if (row == 2) { moreRow = true; }
-        else if (askPage == 0) { oi = row; }
-        else                   { oi = 2 + row; }
-      }
-      if (moreRow) {
-        askPage = 1 - askPage;
-        renderAsk();
-      } else if (oi >= 0) {
-        if (askMultiSelect) {
-          q.selected ^= (1 << oi);
-          renderAsk();                   // re-render to update [•] marker
-        } else {
-          q.single = oi;
-          askAdvance();                  // auto-advance / submit
+
+    // Short-press = release before the long-press threshold. askCancel /
+    // askSendAnswers above may have cleared askId, so re-check.
+    if (askId[0] != 0) {
+      int row = -1;
+      if      (M5.BtnA.wasReleased()) { if (!aLongFired) row = 0; }
+      else if (M5.BtnB.wasReleased()) { if (!bLongFired) row = 1; }
+      else if (M5.BtnC.wasReleased()) { row = 2; }
+      if (row >= 0) {
+        AskQuestion& q = askQs[askCurQ];
+        int  oi = -1;
+        bool moreRow = false;
+        if (q.optCount <= 2) {
+          if (row == 0) oi = 0;
+          else if (row == 2 && q.optCount > 1) oi = 1;
+        } else if (q.optCount == 3) {
+          oi = row;
+        } else {  // 4 options, paged
+          if (row == 2) { moreRow = true; }
+          else if (askPage == 0) { oi = row; }
+          else                   { oi = 2 + row; }
+        }
+        if (moreRow) {
+          askPage = 1 - askPage;
+          renderAsk();
+        } else if (oi >= 0) {
+          if (askMultiSelect) {
+            q.selected ^= (1 << oi);
+            renderAsk();                 // re-render to update [•] marker
+          } else {
+            q.single = oi;
+            askAdvance();                // auto-advance / submit
+          }
         }
       }
     }
+    // Reset long-press flags on release so the next press is fresh.
+    if (M5.BtnA.wasReleased()) aLongFired = false;
+    if (M5.BtnB.wasReleased()) bLongFired = false;
   } else if (promptId[0] != 0 && M5.BtnA.wasPressed()) {
     sendDecision("allow");
   } else if (promptId[0] != 0 && M5.BtnC.wasPressed()) {
