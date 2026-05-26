@@ -51,3 +51,53 @@ async def test_fifo_order_three_requests():
     assert b.active_id == "c" and b.queue_ids == []
     b.resolve("c", "allow"); await tasks[2]
     assert b.active_id is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_active_promotes_and_sends_device_cancel():
+    sends = []
+    b = make_broker(sends)
+    t1 = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    t2 = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    b.cancel("a")  # keyboard won on the active entry
+    assert await t1 is None
+    await asyncio.sleep(0)
+    # device told to clear "a", then "b" promoted.
+    assert sends == [("prompt", "a"), ("cancel", "a"), ("prompt", "b")]
+    assert b.active_id == "b"
+    b.resolve("b", "allow"); await t2
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_entry_is_pruned_not_cleared_on_device():
+    sends = []
+    b = make_broker(sends)
+    t1 = asyncio.create_task(b.request("a", "Bash", "ls", None))
+    t2 = asyncio.create_task(b.request("b", "Bash", "pwd", None))
+    await asyncio.sleep(0)
+    b.cancel("b")  # the QUEUED entry's hook timed out
+    assert await t2 is None
+    # No device cancel for b (it was never on screen); a still active.
+    assert sends == [("prompt", "a")]
+    assert b.active_id == "a" and b.queue_ids == []
+    b.resolve("a", "allow"); await t1
+
+
+@pytest.mark.asyncio
+async def test_queue_full_busy_rejects_when_depth_exceeded():
+    sends = []
+    b = make_broker(sends)
+    tasks = [asyncio.create_task(b.request(x, "Bash", x, None))
+             for x in ["a", "b", "c", "d"]]
+    await asyncio.sleep(0)
+    # active=a; queue=[b,c,d] is depth 3 (MAX_DEPTH) -> all admitted.
+    assert b.active_id == "a" and b.queue_ids == ["b", "c", "d"]
+    assert all(not t.done() for t in tasks)  # none rejected yet
+    # A fifth request exceeds MAX_DEPTH -> busy-reject immediately to terminal.
+    t5 = asyncio.create_task(b.request("e", "Bash", "e", None))
+    assert await t5 is None
+    assert b.queue_ids == ["b", "c", "d"]
+    for x in ["a", "b", "c", "d"]:
+        b.resolve(x, "allow")
+        await asyncio.sleep(0)
