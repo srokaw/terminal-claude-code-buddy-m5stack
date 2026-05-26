@@ -4,6 +4,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 
 spec = importlib.util.spec_from_file_location(
     "buddy_permission_hook",
@@ -85,6 +86,46 @@ def test_request_decision_gets_allow(monkeypatch):
     t.start()
 
     result = hook.request_decision("pid-2", "sess-2", "Bash", "echo hi", None)
+    t.join(timeout=5)
+    assert result == "allow"
+
+
+def test_active_message_resets_deadline(monkeypatch):
+    """An {"type":"active"} message must reset the on-screen deadline.
+
+    With DECISION_TIMEOUT shrunk to 0.2s, the fake bridge waits 0.15s (still
+    inside the original budget) then sends `active`, then waits another 0.15s
+    before sending the real decision. The decision therefore arrives ~0.30s
+    after the request was sent — past the original 0.2s deadline. The only way
+    request_decision can still return "allow" is if the `active` message at
+    ~0.15s reset the deadline (giving a fresh 0.2s, ample for the second
+    0.15s sleep); otherwise it would time out at 0.2s and return None.
+    """
+    monkeypatch.setattr(hook, "DECISION_TIMEOUT", 0.2)
+    sock_path = tempfile.mktemp(prefix="buddy_reset_", suffix=".sock", dir="/tmp")
+    monkeypatch.setattr(hook, "SOCK_PATH", sock_path)
+
+    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server_sock.bind(sock_path)
+    server_sock.listen(1)
+
+    def _serve():
+        conn, _ = server_sock.accept()
+        conn.recv(4096)  # consume the permission_request line
+        # Send `active` near the end of, but inside, the original 0.2s budget.
+        time.sleep(0.15)
+        conn.sendall(json.dumps({"type": "active", "id": "pid-reset"}).encode("utf-8") + b"\n")
+        # Total elapsed at decision (~0.30s) exceeds the original 0.2s budget,
+        # but is well within the fresh 0.2s the reset grants from ~0.15s.
+        time.sleep(0.15)
+        conn.sendall(json.dumps({"decision": "allow"}).encode("utf-8") + b"\n")
+        conn.close()
+        server_sock.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+
+    result = hook.request_decision("pid-reset", "sess-reset", "Bash", "echo hi", None)
     t.join(timeout=5)
     assert result == "allow"
 
