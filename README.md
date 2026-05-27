@@ -22,8 +22,8 @@ three front buttons) rather than the M5StickC Plus.
 ```
 Claude Code (terminal × N)         Local bridge (Python)           M5Stack Core Basic
 ──────────────────────────         ─────────────────────           ──────────────────
- hooks: SessionStart, Stop,  ─sock─▶  • BLE central (bleak)  ─BLE──▶  320×240 status
- Notification … feed status          • aggregates all          NUS    screen
+ hooks: SessionStart, Stop,  ─sock─▶  • BLE central (bleak)  ─BLE──▶  320×240 animated
+ Notification … feed status          • aggregates all          NUS    buddy
  PermissionRequest relays the          sessions' state        proto   3 buttons (A/B/C)
  prompt + waits on the       ◀─sock─  • relays prompt ⇄         ◀──── approve / deny /
  device (native prompt too)             decision                       auto-approve
@@ -33,8 +33,8 @@ Three components live in this repo:
 
 - **`firmware/`** — M5Stack Core Basic firmware (C++ / Arduino / PlatformIO).
   BLE peripheral over the Nordic UART Service with bonded passkey pairing;
-  renders the aggregate status screen, the permission-prompt takeover, and the
-  `AskUserQuestion` screen.
+  renders an **animated buddy** on the home screen (see [The buddy](#the-buddy)),
+  the permission-prompt takeover, and the `AskUserQuestion` screen.
 - **`bridge/`** — Python bridge using `bleak` as the BLE **central**. Maintains
   aggregated state across all terminal sessions, listens on a Unix domain
   socket for hook events, and brokers permission/ask prompts between Claude Code
@@ -154,15 +154,34 @@ with four options, the bottom row is `More >>` / `<< Back` to page. In a
 multi-select question a button press toggles that option, and **long-press B**
 submits. **Long-press A** cancels (answer on the laptop instead).
 
-The status screen shows an aggregate like `running / waiting / total` plus a
-one-line activity message. Auto-approve mode (toggle **B**, available from the
-status screen or during a prompt) shows an **AUTO ON · n** banner with a running
+The home screen shows the animated buddy (see [The buddy](#the-buddy) below); a
+bottom strip carries the one-line activity message and a `N sessions` count.
+Auto-approve mode (toggle **B**, available from the home screen or during a
+prompt) shows an **AUTO ON · n** banner with a running
 count of auto-approvals. The banner is repainted on toggle and after each
 auto-approval, but a routine status redraw clears it until the next one. The
 bridge clears its own auto-approve state
 when the device disconnects, but the device keeps the flag and re-asserts it on
 reconnect — so a disconnect does not durably turn it off. Toggle **B** to turn it
 off for real.
+
+## The buddy
+
+The home screen is an animated retro-phosphor **"cool-S"** character (the
+schoolyard S doodle), green-on-black. Its animation *is* the status display —
+it reflects live session state rather than showing raw counts:
+
+| State      | When                                                              |
+| ---------- | ----------------------------------------------------------------- |
+| **sleep**  | bridge not connected — slow breathing, a drifting `z`             |
+| **idle**   | connected, nothing running — step-by-step construction loop       |
+| **busy**   | one or more sessions running — scanline sweep + progress dots     |
+| **heart**  | ~3s after you approve a prompt with **A** — turns red, floating hearts |
+
+Three more states — **attention**, **celebrate**, **dizzy** — are implemented
+but not yet wired to live triggers in this build. A small bottom strip overlays
+the activity message (left) and a `N sessions` count (right); running/waiting
+are conveyed by the animation, not by on-screen numbers.
 
 ## Behaviors
 
@@ -235,7 +254,9 @@ UTF-8 JSON, one object per line, `\n`-terminated, over the Nordic UART Service
 
 ```
 firmware/        — M5Stack Core Basic firmware (PlatformIO)
-  src/main.cpp   — state machine, BLE peripheral, status/prompt/ask screens
+  src/main.cpp   — state machine, BLE peripheral, 30fps render loop, prompt/ask/passkey screens
+  src/buddy_*.{h,cpp}  — cool-S buddy: geometry, 7-state animations, palette, rendering
+  test/          — native (host) Unity unit tests for the buddy's pure logic
 bridge/          — Python local bridge (BLE central)
   buddy_bridge/  — ble_link, socket_server, permissions broker, protocol, state
   tests/         — pytest suite
@@ -248,12 +269,22 @@ src/, characters/, tools/, REFERENCE.md
 
 ## Tests
 
+**Bridge (Python):**
+
 ```bash
 cd bridge && .venv/bin/python -m pytest
 ```
 
 (Use `python -m pytest`, not bare `pytest` — the `-m` form puts the bridge
 directory on `sys.path` so the `buddy_bridge` package imports.)
+
+**Firmware (native unit tests):** the buddy's pure logic — geometry, state
+machine, palette, easing, idle-reveal timing — is unit-tested off-device via a
+PlatformIO `native` env, no hardware required:
+
+```bash
+cd firmware && pio test -e native
+```
 
 ## License
 

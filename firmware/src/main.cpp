@@ -20,6 +20,10 @@
 #include <M5Unified.h>
 #include <ArduinoJson.h>
 
+#include "buddy_coolS.h"
+#include "buddy_palette.h"
+#include "buddy_state.h"
+
 // Nordic UART Service — must match the bridge / REFERENCE.md exactly.
 #define NUS_SERVICE "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_RX      "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  // central writes here
@@ -38,10 +42,27 @@ static bool autoApprove       = false;
 static volatile bool pendingAutoSync = false;
 
 // Last-known status (for repaint after prompt clears or toast expires).
-static int lastRunning = 0, lastWaiting = 0, lastTotal = 0;
+static volatile int lastRunning = 0, lastWaiting = 0, lastTotal = 0;
 static char lastStatusMsg[64] = "idle";
-static int autoCount = 0;
-static unsigned long autoFlashUntil = 0;  // millis() deadline for green toast
+static volatile int autoCount = 0;
+static volatile unsigned long autoFlashUntil = 0;  // millis() deadline for green toast
+
+static M5GFX_Sprite_t buddySprite(&M5.Display);
+static BuddyDepth buddyDepth = DEPTH_8;
+static bool buddyReady = false;
+
+// New volatile cross-task flags.
+static volatile bool          pairing      = false;
+static volatile unsigned long heartUntil   = 0;
+static volatile uint32_t      passkeyVal   = 0;
+
+// Debug cycle (home screen only).
+static bool         debugActive = false;
+static PersonaState debugState  = PS_SLEEP;
+static unsigned long lastFrameMs = 0;
+
+// Spinlock guarding lastStatusMsg only (see spec "Cross-task synchronization").
+static portMUX_TYPE statusMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ----- AskUserQuestion screen state -----
 static char askId[48] = {0};                 // empty == no ask in flight
@@ -66,44 +87,8 @@ static AskQuestion askQs[4];
 static unsigned long btnAPressMs = 0;        // long-press tracking
 static unsigned long btnBPressMs = 0;
 static const unsigned long LONG_PRESS_MS = 800;
-
-// Renders the live status screen. Phase 1 shows counts only — no message
-// text or transcript content ever reaches the device.
-static void renderStatus(int running, int waiting, int total,
-                         const char* msg) {
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(8, 8);
-  M5.Display.print("Claude Buddy");
-
-  M5.Display.setTextSize(6);
-  M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  M5.Display.setCursor(8, 56);
-  M5.Display.printf("%d", running);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(8, 120);
-  M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  M5.Display.print("running");
-
-  M5.Display.setTextSize(6);
-  M5.Display.setTextColor(TFT_ORANGE, TFT_BLACK);
-  M5.Display.setCursor(170, 56);
-  M5.Display.printf("%d", waiting);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(170, 120);
-  M5.Display.setTextColor(TFT_ORANGE, TFT_BLACK);
-  M5.Display.print("waiting");
-
-  M5.Display.setTextSize(2);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setCursor(8, 160);
-  M5.Display.printf("%d sessions", total);
-  M5.Display.setCursor(8, 200);
-  M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  M5.Display.print(msg);
-}
+static const unsigned long FRAME_MS = 33;     // ~30fps buddy frame interval
+static const unsigned long HEART_MS = 3000;   // heart-state hold after button approve
 
 // Forward declarations for functions called from RxCallbacks (defined later).
 static void sendNotify(const char* json);
@@ -139,6 +124,15 @@ static void renderPrompt(const char* tool, const char* detail,
   M5.Display.setTextColor(TFT_RED, TFT_NAVY);
   M5.Display.setCursor(180, 210);
   M5.Display.print("[C] Deny");
+}
+
+static void renderPasskey(uint32_t pk) {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(8, 8);  M5.Display.print("Pair this code:");
+  M5.Display.setTextSize(4);
+  M5.Display.setCursor(8, 60); M5.Display.printf("%06u", pk);
 }
 
 static void renderAsk() {
@@ -260,16 +254,14 @@ static void askSendAnswers() {
   M5.Display.print("Sent");
   delay(1000);
 
-  askClear();
-  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+  askClear();    // loop repaints the buddy
 }
 
 static void askCancel() {
   char buf[80];
   snprintf(buf, sizeof(buf), "{\"cmd\":\"ask_cancel\",\"id\":\"%s\"}\n", askId);
   sendNotify(buf);
-  askClear();
-  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+  askClear();    // loop repaints the buddy
 }
 
 static void askAdvance() {
@@ -326,10 +318,10 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       lastRunning = doc["running"] | 0;
       lastWaiting = doc["waiting"] | 0;
       lastTotal   = doc["total"]   | 0;
+      portENTER_CRITICAL(&statusMux);
       strlcpy(lastStatusMsg, doc["msg"] | "", sizeof(lastStatusMsg));
-      if (promptId[0] == 0 && askId[0] == 0) {
-        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
-      }
+      portEXIT_CRITICAL(&statusMux);
+      // loop() repaints; no draw here.
     } else if (doc["evt"] == "prompt") {
       const char* incomingId = doc["id"] | "";
       if (promptId[0] != 0 && strcmp(incomingId, promptId) != 0) {
@@ -340,17 +332,17 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         sendNotify(buf);
         return;
       }
-      strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       strlcpy(promptTool,   doc["tool"]   | "", sizeof(promptTool));
       strlcpy(promptDetail, doc["detail"] | "", sizeof(promptDetail));
       strlcpy(promptChange, doc["change"] | "", sizeof(promptChange));
+      // Publish promptId LAST so loop() never reads a half-filled prompt.
+      strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       if (autoApprove) { sendDecision("allow"); }
-      else             { renderPrompt(promptTool, promptDetail, promptChange); }
+      // else: loop() owns the screen and draws the prompt takeover. Drawing
+      // M5.Display from this BLE-task callback races loop()'s pushSprite and
+      // crashes the SPI/DMA mutex (xQueueGenericSend assert).
     } else if (doc["cmd"] == "prompt_cancel") {
-      if (strcmp(doc["id"] | "", promptId) == 0) {
-        promptId[0] = 0;
-        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
-      }
+      if (strcmp(doc["id"] | "", promptId) == 0) promptId[0] = 0;  // loop repaints
     } else if (doc["cmd"] == "get_auto") {
       char buf[40];
       snprintf(buf, sizeof(buf), "{\"cmd\":\"auto\",\"state\":%s}\n",
@@ -359,21 +351,8 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     } else if (doc["evt"] == "auto_fired") {
       autoCount++;
       autoFlashUntil = millis() + 1500;
-      const char* tool = doc["tool"] | "";
-      // Green toast at the bottom over the current status screen.
-      M5.Display.fillRect(0, 200, 320, 40, TFT_DARKGREEN);
-      M5.Display.setTextColor(TFT_WHITE, TFT_DARKGREEN);
-      M5.Display.setTextSize(2);
-      M5.Display.setCursor(8, 210);
-      M5.Display.printf("Auto: %s (%d)", tool, autoCount);
-      // If the AUTO banner is on, refresh it with the new count.
-      if (autoApprove) {
-        M5.Display.fillRect(0, 0, 320, 28, TFT_RED);
-        M5.Display.setTextColor(TFT_WHITE, TFT_RED);
-        M5.Display.setTextSize(2);
-        M5.Display.setCursor(8, 6);
-        M5.Display.printf("AUTO ON · %d", autoCount);
-      }
+      strlcpy(promptTool, doc["tool"] | "", sizeof(promptTool)); // reuse as toast tool
+      // No draw; overlay reads autoCount/autoFlashUntil/autoApprove each frame.
     }
     else if (doc["evt"] == "ask") {
       // Reject if a prompt or a different ask is already on screen.
@@ -386,7 +365,6 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         return;
       }
       askClear();
-      strlcpy(askId, incomingId, sizeof(askId));
       askMultiSelect = doc["multiSelect"] | false;
       JsonArray qs = doc["questions"].as<JsonArray>();
       askQCount = 0;
@@ -409,13 +387,12 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         askQCount++;
       }
       askCurQ = askPage = 0;
-      renderAsk();
+      // Publish askId LAST so loop() never reads half-filled ask state, and
+      // never draw M5.Display from this BLE-task callback (races pushSprite).
+      strlcpy(askId, incomingId, sizeof(askId));
     }
     else if (doc["cmd"] == "ask_cancel") {
-      if (strcmp(doc["id"] | "", askId) == 0) {
-        askClear();
-        renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
-      }
+      if (strcmp(doc["id"] | "", askId) == 0) askClear();          // loop repaints
     }
   }
 };
@@ -426,20 +403,45 @@ class SecurityCallbacks : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override { return 0; }
   void onPassKeyNotify(uint32_t pk) override {
     Serial.printf("\n  BLE PAIRING PASSKEY: %06u\n\n", pk);
-    M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(8, 8);
-    M5.Display.print("Pair this code:");
-    M5.Display.setTextSize(4);
-    M5.Display.setCursor(8, 60);
-    M5.Display.printf("%06u", pk);
+    passkeyVal = pk;
+    pairing    = true;            // loop() draws the passkey screen
   }
   bool onConfirmPIN(uint32_t) override { return true; }
   bool onSecurityRequest() override { return true; }
   void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
+    pairing = false;
     Serial.printf("[ble] pairing %s\n", cmpl.success ? "SUCCEEDED" : "FAILED");
   }
 };
+
+static void setupBuddySprite() {
+  Serial.printf("[buddy] free heap %u, largest block %u\n",
+                ESP.getFreeHeap(),
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  // Try 8bpp full-screen (~75KB) with a 20KB margin.
+  buddySprite.setColorDepth(8);
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) > (76800u + 20480u) &&
+      buddySprite.createSprite(320, 240)) {
+    uint16_t pal[PAL8_SIZE]; buildPalette8(pal);
+    for (int i = 0; i < PAL8_SIZE; ++i) buddySprite.setPaletteColor(i, pal[i]);
+    buddyDepth = DEPTH_8; buddyReady = true;
+    buddyInit(DEPTH_8);
+    Serial.println("[buddy] sprite 8bpp 320x240");
+    return;
+  }
+  // Fallback: 4bpp full-screen (~37.5KB).
+  buddySprite.setColorDepth(4);
+  if (buddySprite.createSprite(320, 240)) {
+    uint16_t pal[PAL4_SIZE]; buildPalette4(pal);
+    for (int i = 0; i < PAL4_SIZE; ++i) buddySprite.setPaletteColor(i, pal[i]);
+    buddyDepth = DEPTH_4; buddyReady = true;
+    buddyInit(DEPTH_4);
+    Serial.println("[buddy] sprite 4bpp 320x240 (fallback)");
+    return;
+  }
+  Serial.println("[buddy] ERROR: could not allocate sprite; buddy disabled");
+  buddyReady = false;
+}
 
 void setup() {
   auto cfg = M5.config();
@@ -502,6 +504,8 @@ void setup() {
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
   Serial.println("[buddy] advertising as 'Claude-Buddy'");
+
+  setupBuddySprite();
 }
 
 // Send a JSON string as a NUS TX notification to the central.
@@ -524,19 +528,21 @@ static void sendNotify(const char* json) {
   } while (off < total);
 }
 
-// Send the button decision back to the bridge, then clear the prompt state
-// and return to the status screen (next heartbeat will refresh the counts).
+// Send the button decision back to the bridge, then clear the prompt state.
+// loop() repaints the buddy on the next frame.
 static void sendDecision(const char* decision) {
   char buf[160];  // fits a full promptId[48] without truncating the JSON
   snprintf(buf, sizeof(buf),
            "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}\n",
            promptId, decision);
   sendNotify(buf);
-  promptId[0] = 0;           // clear pending prompt
-  renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+  promptId[0] = 0;     // clear pending prompt; loop repaints
+  // NOTE: heartUntil is set by the BtnA button handler, NOT here, so
+  // auto-approve auto-allows (which also call this) do not trigger heart.
 }
 
-// Toggle auto-approve mode, notify the bridge, and show a banner + beep.
+// Toggle auto-approve mode, notify the bridge, and beep. The AUTO banner is
+// drawn by the overlay each frame; this only mutates state + plays the beep.
 static void toggleAuto() {
   autoApprove = !autoApprove;
   if (!autoApprove) autoCount = 0;
@@ -544,15 +550,8 @@ static void toggleAuto() {
   snprintf(buf, sizeof(buf), "{\"cmd\":\"auto\",\"state\":%s}\n",
            autoApprove ? "true" : "false");
   sendNotify(buf);
-  // Banner so the auto-approve state is never ambiguous.
-  M5.Display.fillRect(0, 0, 320, 28, autoApprove ? TFT_RED : TFT_BLACK);
-  if (autoApprove) {
-    M5.Display.setTextColor(TFT_WHITE, TFT_RED);
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(8, 6);
-    M5.Display.printf("AUTO ON · %d", autoCount);
-    M5.Speaker.tone(880, 120);  // toggle-confirmation beep — keep
-  }
+  if (autoApprove) M5.Speaker.tone(880, 120);   // keep the confirmation beep
+  // Banner is drawn by the overlay each frame; no direct draw here.
 }
 
 void loop() {
@@ -568,21 +567,6 @@ void loop() {
     sendNotify(buf);
     Serial.printf("[ble] sent auto-sync state=%s\n",
                   autoApprove ? "true" : "false");
-  }
-
-  if (autoFlashUntil != 0 && millis() > autoFlashUntil) {
-    autoFlashUntil = 0;
-    if (promptId[0] == 0) {
-      renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
-      if (autoApprove) {
-        // Re-paint AUTO banner over the freshly rendered status.
-        M5.Display.fillRect(0, 0, 320, 28, TFT_RED);
-        M5.Display.setTextColor(TFT_WHITE, TFT_RED);
-        M5.Display.setTextSize(2);
-        M5.Display.setCursor(8, 6);
-        M5.Display.printf("AUTO ON · %d", autoCount);
-      }
-    }
   }
 
   // --- Button handling ---------------------------------------------------
@@ -647,6 +631,7 @@ void loop() {
       }
     }
   } else if (promptId[0] != 0 && M5.BtnA.wasPressed()) {
+    heartUntil = millis() + HEART_MS;   // button approve -> heart (auto-allows don't)
     sendDecision("allow");
   } else if (promptId[0] != 0 && M5.BtnC.wasPressed()) {
     sendDecision("deny");
@@ -658,5 +643,73 @@ void loop() {
   // into the next ask, where it would swallow the first short-press.
   if (M5.BtnA.wasReleased()) aLongFired = false;
   if (M5.BtnB.wasReleased()) bLongFired = false;
-  delay(20);
+
+  // Debug cycle: long-press BtnA on the home screen toggles debug; BtnC advances.
+  if (askId[0] == 0 && promptId[0] == 0 && !pairing) {
+    static bool dbgLongFired = false;
+    if (M5.BtnA.isPressed() && btnAPressMs != 0 &&
+        (millis() - btnAPressMs) >= LONG_PRESS_MS && !dbgLongFired) {
+      dbgLongFired = true;
+      debugActive = !debugActive;
+      debugState  = PS_SLEEP;
+    }
+    if (M5.BtnA.wasReleased()) dbgLongFired = false;
+    if (debugActive && M5.BtnC.wasPressed())
+      debugState = (PersonaState)(((int)debugState + 1) % (int)PS_COUNT);
+  }
+
+  // --- Screen render: loop() is the SOLE owner of M5.Display -------------
+  // Takeovers (passkey / prompt / ask) are drawn HERE, once on entry. They are
+  // never drawn from a BLE callback: doing so races loop()'s pushSprite on the
+  // shared SPI bus and crashes the DMA mutex (xQueueGenericSend assert). The
+  // BLE callbacks only publish state (promptId/askId/passkeyVal). Button-driven
+  // ask redraws happen elsewhere in loop() (same task), which is safe.
+  if (buddyReady) {
+    unsigned long now = millis();
+    static uint32_t shownPasskey = 0xFFFFFFFF;
+    static bool promptShown = false;
+    static bool askShown = false;
+    if (pairing) {
+      if (passkeyVal != shownPasskey) {     // draw once per pairing/passkey
+        renderPasskey(passkeyVal);
+        shownPasskey = passkeyVal;
+      }
+      promptShown = false; askShown = false;
+    } else if (promptId[0] != 0) {
+      if (!promptShown) {                   // draw prompt takeover once on entry
+        renderPrompt(promptTool, promptDetail, promptChange);
+        promptShown = true;
+      }
+      shownPasskey = 0xFFFFFFFF; askShown = false;
+    } else if (askId[0] != 0) {
+      if (!askShown) { renderAsk(); askShown = true; }  // draw ask once on entry
+      shownPasskey = 0xFFFFFFFF; promptShown = false;
+    } else {
+      shownPasskey = 0xFFFFFFFF;            // reset so takeovers redraw next entry
+      promptShown = false; askShown = false;
+      if (now - lastFrameMs >= FRAME_MS) {
+        lastFrameMs = now;
+        BuddyOverlay ov;
+        ov.running = lastRunning; ov.waiting = lastWaiting; ov.total = lastTotal;
+        portENTER_CRITICAL(&statusMux);
+        strlcpy(ov.statusMsg, lastStatusMsg, sizeof(ov.statusMsg));
+        portEXIT_CRITICAL(&statusMux);
+        ov.autoOn      = autoApprove;
+        ov.autoCount   = autoCount;
+        ov.autoToast   = (autoFlashUntil != 0 && now < autoFlashUntil);
+        // promptTool is read unlocked here; worst case a 1-frame torn toast label
+        // (cosmetic, self-heals next frame). Not worth widening the statusMux scope.
+        strlcpy(ov.autoToolMsg, promptTool, sizeof(ov.autoToolMsg));
+        ov.debugActive = debugActive;
+
+        PersonaInputs pin = { centralConnected, lastRunning, heartUntil, now,
+                              debugActive, debugState };
+        PersonaState  st  = derivePersonaState(pin);
+        buddyCoolSTick(buddySprite, st, now, ov);
+        buddySprite.pushSprite(0, 0);
+      }
+    }
+  }
+
+  delay(1);   // pace off the 33ms frame accumulator, keep buttons responsive
 }
