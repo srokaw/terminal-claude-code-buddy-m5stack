@@ -179,19 +179,24 @@ static void drawOverlay(M5GFX_Sprite_t& spr, const BuddyOverlay& o) {
     return;                       // counts suppressed in debug
   }
   spr.setTextDatum(top_left);
-  spr.setTextColor(greenIdx(1.0f));
-  // Left margin: running (top), waiting (below). Right margin: total.
-  spr.setTextSize(2);
-  spr.setCursor(6, 40);  spr.printf("%dR", o.running);
-  spr.setCursor(6, 90);  spr.printf("%dW", o.waiting);
-  spr.setCursor(258, 40); spr.printf("%d", o.total);
-  // Status msg: bottom strip, truncated to fit 320px (~52 chars at size 1).
-  // Suppressed when autoToast is active (both share y=230).
+  // Running/waiting are shown in words on the bottom status strip, so no
+  // separate side-margin counts (they were redundant).
+  // Bottom strip: status msg (left) + total sessions (right), both size 1.
+  // Suppressed when autoToast is active (shares the bottom row).
   if (o.statusMsg[0] && !o.autoToast) {
     spr.setTextSize(1);
     char buf[54]; strncpy(buf, o.statusMsg, 53); buf[53] = 0;
     spr.setTextColor(greenIdx(0.5f));
     spr.setCursor(6, 230); spr.print(buf);
+  }
+  // Total sessions, bottom-right, right-aligned — labeled so it's unambiguous.
+  if (!o.autoToast) {
+    char sb[20]; snprintf(sb, sizeof(sb), "%d sessions", o.total);
+    spr.setTextSize(1);
+    spr.setTextColor(greenIdx(0.7f));
+    spr.setTextDatum(top_right);
+    spr.drawString(sb, 314, 230);
+    spr.setTextDatum(top_left);
   }
   // AUTO banner (top), drawn over everything when on.
   if (o.autoOn) {
