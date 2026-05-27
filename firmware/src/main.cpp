@@ -332,12 +332,15 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         sendNotify(buf);
         return;
       }
-      strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       strlcpy(promptTool,   doc["tool"]   | "", sizeof(promptTool));
       strlcpy(promptDetail, doc["detail"] | "", sizeof(promptDetail));
       strlcpy(promptChange, doc["change"] | "", sizeof(promptChange));
+      // Publish promptId LAST so loop() never reads a half-filled prompt.
+      strlcpy(promptId,     doc["id"]     | "", sizeof(promptId));
       if (autoApprove) { sendDecision("allow"); }
-      else             { renderPrompt(promptTool, promptDetail, promptChange); }
+      // else: loop() owns the screen and draws the prompt takeover. Drawing
+      // M5.Display from this BLE-task callback races loop()'s pushSprite and
+      // crashes the SPI/DMA mutex (xQueueGenericSend assert).
     } else if (doc["cmd"] == "prompt_cancel") {
       if (strcmp(doc["id"] | "", promptId) == 0) promptId[0] = 0;  // loop repaints
     } else if (doc["cmd"] == "get_auto") {
@@ -362,7 +365,6 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         return;
       }
       askClear();
-      strlcpy(askId, incomingId, sizeof(askId));
       askMultiSelect = doc["multiSelect"] | false;
       JsonArray qs = doc["questions"].as<JsonArray>();
       askQCount = 0;
@@ -385,7 +387,9 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         askQCount++;
       }
       askCurQ = askPage = 0;
-      renderAsk();
+      // Publish askId LAST so loop() never reads half-filled ask state, and
+      // never draw M5.Display from this BLE-task callback (races pushSprite).
+      strlcpy(askId, incomingId, sizeof(askId));
     }
     else if (doc["cmd"] == "ask_cancel") {
       if (strcmp(doc["id"] | "", askId) == 0) askClear();          // loop repaints
@@ -654,17 +658,35 @@ void loop() {
       debugState = (PersonaState)(((int)debugState + 1) % (int)PS_COUNT);
   }
 
-  // --- Buddy render (home screen only, ~30fps) ---------------------------
-  if (buddyReady && askId[0] == 0 && promptId[0] == 0) {
+  // --- Screen render: loop() is the SOLE owner of M5.Display -------------
+  // Takeovers (passkey / prompt / ask) are drawn HERE, once on entry. They are
+  // never drawn from a BLE callback: doing so races loop()'s pushSprite on the
+  // shared SPI bus and crashes the DMA mutex (xQueueGenericSend assert). The
+  // BLE callbacks only publish state (promptId/askId/passkeyVal). Button-driven
+  // ask redraws happen elsewhere in loop() (same task), which is safe.
+  if (buddyReady) {
     unsigned long now = millis();
     static uint32_t shownPasskey = 0xFFFFFFFF;
+    static bool promptShown = false;
+    static bool askShown = false;
     if (pairing) {
       if (passkeyVal != shownPasskey) {     // draw once per pairing/passkey
         renderPasskey(passkeyVal);
         shownPasskey = passkeyVal;
       }
+      promptShown = false; askShown = false;
+    } else if (promptId[0] != 0) {
+      if (!promptShown) {                   // draw prompt takeover once on entry
+        renderPrompt(promptTool, promptDetail, promptChange);
+        promptShown = true;
+      }
+      shownPasskey = 0xFFFFFFFF; askShown = false;
+    } else if (askId[0] != 0) {
+      if (!askShown) { renderAsk(); askShown = true; }  // draw ask once on entry
+      shownPasskey = 0xFFFFFFFF; promptShown = false;
     } else {
-      shownPasskey = 0xFFFFFFFF;            // force redraw on next pairing entry
+      shownPasskey = 0xFFFFFFFF;            // reset so takeovers redraw next entry
+      promptShown = false; askShown = false;
       if (now - lastFrameMs >= FRAME_MS) {
         lastFrameMs = now;
         BuddyOverlay ov;
