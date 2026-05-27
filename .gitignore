@@ -10,3 +10,6 @@ __pycache__/
 # Local Superpowers working dirs (brainstorm sessions, server logs — contain absolute paths)
 .superpowers/
 
+# Superpowers design/plan docs — keep local, never commit to the public remote
+docs/superpowers/
+
