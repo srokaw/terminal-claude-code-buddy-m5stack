@@ -74,6 +74,9 @@ async def test_permission_request_gets_decision_response(tmp_path):
                                  "detail": "ls", "change": None}).encode() + b"\n")
         await writer.drain()
         await asyncio.sleep(0.05)
+        # First line is the active message sent on promotion.
+        active = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(active) == {"type": "active", "id": "p1"}
         broker.resolve("p1", "allow")
         line = await asyncio.wait_for(reader.readline(), timeout=1.0)
         assert json.loads(line) == {"decision": "allow"}
@@ -86,8 +89,68 @@ async def test_permission_request_gets_decision_response(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_active_message_sent_to_promoted_hook(tmp_path):
+    """When a queued entry is promoted to the device, the bridge pushes
+    {"type":"active","id":<id>} to THAT hook's socket BEFORE its decision."""
+    import tempfile
+    sock_path = tempfile.mktemp(prefix="buddy_", suffix=".sock", dir="/tmp")
+    reg = SessionRegistry()
+    broker = PermissionBroker(send_prompt=lambda *a: None,
+                              send_cancel=lambda pid: None)
+    server = await serve(sock_path, reg, on_change=lambda: None, broker=broker)
+    try:
+        # Client A: becomes active immediately.
+        ra, wa = await asyncio.open_unix_connection(sock_path)
+        wa.write(json.dumps({"type": "permission_request", "id": "a",
+                             "session": "sa", "tool": "Bash",
+                             "detail": "ls", "change": None}).encode() + b"\n")
+        await wa.drain()
+        await asyncio.sleep(0.05)
+        assert broker.active_id == "a"
+
+        # Client B: queues behind A.
+        rb, wb = await asyncio.open_unix_connection(sock_path)
+        wb.write(json.dumps({"type": "permission_request", "id": "b",
+                             "session": "sb", "tool": "Bash",
+                             "detail": "pwd", "change": None}).encode() + b"\n")
+        await wb.drain()
+        await asyncio.sleep(0.05)
+        assert broker.queue_ids == ["b"]
+
+        # A becomes active first; its own active message is delivered to A.
+        line_a = await asyncio.wait_for(ra.readline(), timeout=1.0)
+        assert json.loads(line_a) == {"type": "active", "id": "a"}
+
+        # Resolve A -> B is promoted.
+        broker.resolve("a", "allow")
+        await asyncio.sleep(0.05)
+        assert broker.active_id == "b"
+
+        # A receives its decision.
+        dec_a = await asyncio.wait_for(ra.readline(), timeout=1.0)
+        assert json.loads(dec_a) == {"decision": "allow"}
+
+        # B's FIRST line must be the active message (sent on promotion),
+        # arriving before B's eventual decision line.
+        line_b = await asyncio.wait_for(rb.readline(), timeout=1.0)
+        assert json.loads(line_b) == {"type": "active", "id": "b"}
+
+        broker.resolve("b", "deny")
+        dec_b = await asyncio.wait_for(rb.readline(), timeout=1.0)
+        assert json.loads(dec_b) == {"decision": "deny"}
+
+        wa.close()
+        wb.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
+
+@pytest.mark.asyncio
 async def test_permission_request_connection_drop_cleans_up(tmp_path):
-    """If the hook disconnects before any decision, broker._pending must be empty."""
+    """If the hook disconnects before any decision, no active/queued entry remains."""
     import tempfile
     sock_path = tempfile.mktemp(prefix="buddy_", suffix=".sock", dir="/tmp")
     reg = SessionRegistry()
@@ -108,8 +171,10 @@ async def test_permission_request_connection_drop_cleans_up(tmp_path):
         except Exception:
             pass
         await asyncio.sleep(0.15)
-        assert broker._pending == {}, (
-            f"Expected empty _pending after connection drop, got {broker._pending}")
+        assert broker.active_id is None, (
+            f"Expected no active entry after connection drop, got {broker.active_id}")
+        assert broker.queue_ids == [], (
+            f"Expected empty queue after connection drop, got {broker.queue_ids}")
     finally:
         server.close()
         await server.wait_closed()
@@ -134,6 +199,9 @@ async def test_prompt_cancel_on_same_connection_resolves(tmp_path):
                                  "detail": "rm -rf /", "change": None}).encode() + b"\n")
         await writer.drain()
         await asyncio.sleep(0.05)
+        # First line is the active message sent on promotion.
+        active = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(active) == {"type": "active", "id": pid}
         # Send prompt_cancel on the same connection (keyboard won).
         writer.write(json.dumps({"type": "prompt_cancel", "id": pid}).encode() + b"\n")
         await writer.drain()
@@ -143,10 +211,12 @@ async def test_prompt_cancel_on_same_connection_resolves(tmp_path):
         resp = json.loads(line)
         assert "decision" in resp, (
             f"Expected decision key in response, got {resp}")
-        # Broker future must be resolved (no leak).
+        # Broker state must be cleared (no leak).
         await asyncio.sleep(0.1)
-        assert broker._pending == {}, (
-            f"Expected empty _pending after cancel, got {broker._pending}")
+        assert broker.active_id is None, (
+            f"Expected no active entry after cancel, got {broker.active_id}")
+        assert broker.queue_ids == [], (
+            f"Expected empty queue after cancel, got {broker.queue_ids}")
         writer.close()
     finally:
         server.close()
@@ -197,7 +267,7 @@ async def test_ask_request_round_trip(tmp_path):
     sent_ask = []
     broker = PermissionBroker(
         send_prompt=lambda *a: None, send_cancel=lambda *a: None,
-        send_ask=lambda pid, ms, qs: sent_ask.append((pid, ms, qs)),
+        send_ask=lambda pid, ms, qs, session="": sent_ask.append((pid, ms, qs)),
         send_ask_cancel=lambda *a: None)
     server = await serve(sock, reg, on_change=lambda: None, broker=broker)
     try:
@@ -213,6 +283,9 @@ async def test_ask_request_round_trip(tmp_path):
             if sent_ask:
                 break
         assert sent_ask and sent_ask[0][0] == "k1"
+        # First line is the active message sent on promotion.
+        active = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(active) == {"type": "active", "id": "k1"}
         broker.resolve_ask("k1", [{"label": "X"}])
         line = await asyncio.wait_for(reader.readline(), timeout=1.0)
         assert json.loads(line) == {"answers": [{"label": "X"}]}
@@ -241,6 +314,9 @@ async def test_ask_cancel_from_hook(tmp_path):
                       "\n").encode())
         await writer.drain()
         await asyncio.sleep(0.05)
+        # First line is the active message sent on promotion.
+        active = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert json.loads(active) == {"type": "active", "id": "k2"}
         writer.write((json.dumps({"type": "ask_cancel", "id": "k2"}) +
                       "\n").encode())
         await writer.drain()

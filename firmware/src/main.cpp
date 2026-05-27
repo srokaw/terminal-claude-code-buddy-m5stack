@@ -33,6 +33,7 @@ static char promptId[48]      = {0};
 static char promptTool[24]    = {0};
 static char promptDetail[200] = {0};
 static char promptChange[40]  = {0};
+static char promptSession[24] = {0};
 static bool autoApprove       = false;
 // Set true when a central connects so loop() re-syncs the auto state once.
 static volatile bool pendingAutoSync = false;
@@ -49,6 +50,7 @@ static bool askMultiSelect = false;
 static int  askQCount = 0;                   // number of questions, 1..4
 static int  askCurQ   = 0;                   // 0..askQCount-1
 static int  askPage   = 0;                   // 0 for 2-3 opts; 0/1 for 4 opts
+static char askSession[24] = {0};
 
 struct AskOption {
   char label[28];
@@ -133,6 +135,12 @@ static void renderPrompt(const char* tool, const char* detail,
     M5.Display.setCursor(8, 140);
     M5.Display.print(change);
   }
+  if (promptSession[0] != '\0') {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_NAVY);
+    M5.Display.setCursor(8, 190);
+    M5.Display.printf("from: %.12s", promptSession);
+  }
   M5.Display.setTextColor(TFT_GREEN, TFT_NAVY);
   M5.Display.setCursor(8, 210);
   M5.Display.print("[A] Allow");
@@ -157,6 +165,12 @@ static void renderAsk() {
     M5.Display.setTextSize(1);
     M5.Display.setCursor(264, 8);
     M5.Display.print(chip);
+  }
+  if (askSession[0] != '\0') {
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setCursor(8, 48);     // free band between header (~y24) and row0 (y60)
+    M5.Display.printf("from: %.12s", askSession);
   }
 
   // Body: A/B/C rows. For 4 options, paged.
@@ -217,6 +231,7 @@ static void renderAsk() {
 
 static void askClear() {
   askId[0] = 0;
+  askSession[0] = 0;
   askQCount = 0;
   askCurQ = askPage = 0;
   askMultiSelect = false;
@@ -291,7 +306,14 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
   void onDisconnect(BLEServer* s) override {
     centralConnected = false;
-    Serial.println("[ble] central disconnected -- re-advertising");
+    // Clear any on-screen prompt/ask so a reconnect starts clean — otherwise
+    // the device would hold a stale id and busy-reject the bridge's resend
+    // (livelock). The bridge re-sends the active prompt on reconnect.
+    promptId[0] = 0;
+    promptSession[0] = 0;
+    askClear();   // clears askId + ask question state (incl. askSession)
+    renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
+    Serial.println("[ble] central disconnected -- cleared prompt, re-advertising");
     s->getAdvertising()->start();
   }
 };
@@ -332,6 +354,10 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       }
     } else if (doc["evt"] == "prompt") {
       const char* incomingId = doc["id"] | "";
+      // Bridge serializes prompts (one active at a time), so a different
+      // incoming id here means a genuine race (e.g. reconnect/replay). Busy-
+      // reject is the correct backstop; the bridge bounds its resends and
+      // clears device state on disconnect (see onDisconnect) to avoid livelock.
       if (promptId[0] != 0 && strcmp(incomingId, promptId) != 0) {
         // Already showing a different prompt — tell the bridge to fall back.
         char buf[80];
@@ -344,11 +370,13 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       strlcpy(promptTool,   doc["tool"]   | "", sizeof(promptTool));
       strlcpy(promptDetail, doc["detail"] | "", sizeof(promptDetail));
       strlcpy(promptChange, doc["change"] | "", sizeof(promptChange));
+      strlcpy(promptSession, doc["session"] | "", sizeof(promptSession));
       if (autoApprove) { sendDecision("allow"); }
       else             { renderPrompt(promptTool, promptDetail, promptChange); }
     } else if (doc["cmd"] == "prompt_cancel") {
       if (strcmp(doc["id"] | "", promptId) == 0) {
         promptId[0] = 0;
+        promptSession[0] = 0;
         renderStatus(lastRunning, lastWaiting, lastTotal, lastStatusMsg);
       }
     } else if (doc["cmd"] == "get_auto") {
@@ -378,6 +406,10 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     else if (doc["evt"] == "ask") {
       // Reject if a prompt or a different ask is already on screen.
       const char* incomingId = doc["id"] | "";
+      // Bridge serializes asks (one active at a time), so a different
+      // incoming id here means a genuine race (e.g. reconnect/replay). Busy-
+      // reject is the correct backstop; the bridge bounds its resends and
+      // clears device state on disconnect (see onDisconnect) to avoid livelock.
       if (promptId[0] != 0 || (askId[0] != 0 && strcmp(incomingId, askId) != 0)) {
         char buf[80];
         snprintf(buf, sizeof(buf),
@@ -387,6 +419,7 @@ class RxCallbacks : public BLECharacteristicCallbacks {
       }
       askClear();
       strlcpy(askId, incomingId, sizeof(askId));
+      strlcpy(askSession, doc["session"] | "", sizeof(askSession));
       askMultiSelect = doc["multiSelect"] | false;
       JsonArray qs = doc["questions"].as<JsonArray>();
       askQCount = 0;

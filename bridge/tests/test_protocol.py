@@ -130,3 +130,29 @@ def test_decode_ask_cancel_from_device():
 def test_decode_ask_cancel_requires_id():
     from buddy_bridge.protocol import decode_device_message
     assert decode_device_message('{"cmd":"ask_cancel"}') is None
+
+
+def test_encode_ask_request_includes_session():
+    from buddy_bridge.protocol import encode_ask_request
+    raw = encode_ask_request("id1", True, [{"text": "q", "options": []}],
+                             session="sess-1")
+    obj = json.loads(raw.decode("utf-8"))
+    assert obj["evt"] == "ask"
+    assert obj["session"] == "sess-1"
+
+
+def test_encode_ask_request_session_optional():
+    from buddy_bridge.protocol import encode_ask_request
+    raw = encode_ask_request("id1", False, [])
+    obj = json.loads(raw.decode("utf-8"))
+    assert "session" not in obj or obj["session"] == ""
+
+
+def test_encode_prompt_includes_session():
+    obj = json.loads(encode_prompt("p", "Bash", "ls", None, session="s").decode())
+    assert obj["session"] == "s"
+
+
+def test_encode_prompt_session_optional():
+    obj = json.loads(encode_prompt("p", "Bash", "ls", None).decode())
+    assert "session" not in obj or obj["session"] == ""

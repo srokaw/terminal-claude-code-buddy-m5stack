@@ -27,12 +27,14 @@ class BleLink:
     """Maintains a connection to the buddy device and writes status lines."""
 
     def __init__(self, device_name: str = DEVICE_NAME,
-                 on_device_message=None, on_disconnect=None) -> None:
+                 on_device_message=None, on_disconnect=None,
+                 on_connect=None) -> None:
         self._device_name = device_name
         self._client: BleakClient | None = None
         self._last_payload: bytes | None = None
         self._on_device_message = on_device_message
         self._on_disconnect = on_disconnect
+        self._on_connect = on_connect
         self._rx_buffer = b""
         self._send_lock = asyncio.Lock()  # serialize chunked writes
 
@@ -63,6 +65,7 @@ class BleLink:
                                                        response=False)
                 except (BleakError, EOFError, asyncio.TimeoutError):
                     pass
+            self._fire_connect()
         except BleakError:
             return False
         return True
@@ -70,6 +73,10 @@ class BleLink:
     def _handle_disconnect(self) -> None:
         if self._on_disconnect is not None:
             self._on_disconnect()
+
+    def _fire_connect(self) -> None:
+        if self._on_connect is not None:
+            self._on_connect()
 
     def _handle_notify(self, _char, data: bytes) -> None:
         if self._on_device_message is None:

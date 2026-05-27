@@ -24,8 +24,8 @@ SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
 # DECISION_TIMEOUT and ASK_TIMEOUT must stay below the `timeout` set on the
 # PermissionRequest hook entry in ~/.claude/settings.json (currently 90 s) so
 # that Claude Code's SIGTERM-cancel relationship holds.
-DECISION_TIMEOUT = 45.0  # seconds to wait for a buddy button press
-ASK_TIMEOUT = 60.0  # seconds — asks can have multiple questions; allow more.
+DECISION_TIMEOUT = 30.0  # on-screen seconds for a binary permission
+ASK_TIMEOUT = 85.0       # on-screen seconds for an ask (kept < settings.json 90s)
 
 # Tools that are an interaction, not a buddy-approvable action — a question or
 # a plan, not a command/file/network action. The device's binary allow/deny is
@@ -151,23 +151,31 @@ def request_decision(prompt_id, session, tool, detail, change):
                      "detail": detail, "change": change})
         deadline = time.monotonic() + DECISION_TIMEOUT
         buf = b""
-        while b"\n" not in buf:
+        while True:
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    continue
+                if msg.get("type") == "active":
+                    deadline = time.monotonic() + DECISION_TIMEOUT  # on-screen now
+                    continue
+                decision = msg.get("decision")
+                return decision if decision in ("allow", "deny") else None
             remaining = deadline - time.monotonic()
             if remaining <= 0 or len(buf) > 65536:
-                return None  # deadline/overflow -> caller decides to cancel
+                return None
             sock.settimeout(remaining)
             chunk = sock.recv(256)
             if not chunk:
-                return None  # bridge closed -> native prompt stands
+                return None
             buf += chunk
-        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
     except (OSError, ValueError):
-        return None  # I/O or parse error -> native prompt stands
-    decision = resp.get("decision")
-    return decision if decision in ("allow", "deny") else None
+        return None
 
 
-def request_answers(ask_id, multi_select, questions):
+def request_answers(ask_id, session, multi_select, questions):
     """Connect to the bridge, send an ask_request, return the answers list.
 
     Returns the list of per-question answers (each {"label":...} or
@@ -184,11 +192,23 @@ def request_answers(ask_id, multi_select, questions):
     _prompt_id = ask_id
     try:
         _send(sock, {"type": "ask_request", "id": ask_id,
+                     "session": session,
                      "multiSelect": multi_select,
                      "questions": questions})
         deadline = time.monotonic() + ASK_TIMEOUT
         buf = b""
-        while b"\n" not in buf:
+        while True:
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    continue
+                if msg.get("type") == "active":
+                    deadline = time.monotonic() + ASK_TIMEOUT
+                    continue
+                answers = msg.get("answers")
+                return answers if isinstance(answers, list) else None
             remaining = deadline - time.monotonic()
             if remaining <= 0 or len(buf) > 65536:
                 return None
@@ -197,11 +217,8 @@ def request_answers(ask_id, multi_select, questions):
             if not chunk:
                 return None
             buf += chunk
-        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
     except (OSError, ValueError):
         return None
-    answers = resp.get("answers")
-    return answers if isinstance(answers, list) else None
 
 
 def main():
@@ -232,7 +249,7 @@ def main():
                                    "desc":  o.get("description", "")}
                                   for o in (q.get("options") or [])]}
                      for q in questions]
-        answers = request_answers(_prompt_id, multi_select, device_qs)
+        answers = request_answers(_prompt_id, session, multi_select, device_qs)
         if answers is not None and len(answers) == len(questions):
             print(json.dumps(ask_decision_output(questions, answers)))
             sys.exit(0)

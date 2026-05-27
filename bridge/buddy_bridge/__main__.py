@@ -37,10 +37,8 @@ async def main() -> None:
         elif msg["cmd"] == "auto":
             broker.set_auto_approve(msg["state"])
         elif msg["cmd"] == "prompt_busy":
-            # The id may belong to either family; cancelling the wrong one is a
-            # safe no-op. Whichever request was rejected yields to the native UI.
-            broker.cancel(msg["id"])
-            broker.cancel_ask(msg["id"])
+            # Device is busy for this id: bounded resend of the active entry.
+            broker.on_busy(msg["id"])
         elif msg["cmd"] == "ask_answer":
             broker.resolve_ask(msg["id"], msg["answers"])
         elif msg["cmd"] == "ask_cancel":
@@ -50,15 +48,19 @@ async def main() -> None:
         broker = broker_ref[0]
         broker.set_auto_approve(False)  # safe default until device re-confirms
 
-    link = BleLink(on_device_message=on_device_message, on_disconnect=on_disconnect)
+    def on_connect() -> None:
+        broker_ref[0].resend_active()
+
+    link = BleLink(on_device_message=on_device_message, on_disconnect=on_disconnect,
+                   on_connect=on_connect)
 
     def spawn(coro) -> None:
         t = asyncio.create_task(coro)
         _pending.add(t)
         t.add_done_callback(_pending.discard)
 
-    def send_prompt(pid: str, tool: str, detail: str, change) -> None:
-        spawn(link.send(encode_prompt(pid, tool, detail, change)))
+    def send_prompt(pid: str, tool: str, detail: str, change, session: str = "") -> None:
+        spawn(link.send(encode_prompt(pid, tool, detail, change, session)))
 
     def send_cancel(pid: str) -> None:
         spawn(link.send(encode_prompt_cancel(pid)))
@@ -66,15 +68,16 @@ async def main() -> None:
     def send_auto_fired(tool: str) -> None:
         spawn(link.send(encode_auto_fired(tool)))
 
-    def send_ask(aid: str, multi_select: bool, questions: list) -> None:
-        spawn(link.send(encode_ask_request(aid, multi_select, questions)))
+    def send_ask(aid: str, multi_select: bool, questions: list, session: str = "") -> None:
+        spawn(link.send(encode_ask_request(aid, multi_select, questions, session)))
 
     def send_ask_cancel(aid: str) -> None:
         spawn(link.send(encode_ask_cancel(aid)))
 
     broker = PermissionBroker(send_prompt=send_prompt, send_cancel=send_cancel,
                               send_auto_fired=send_auto_fired,
-                              send_ask=send_ask, send_ask_cancel=send_ask_cancel)
+                              send_ask=send_ask, send_ask_cancel=send_ask_cancel,
+                              link_connected=lambda: link.connected)
     broker_ref.append(broker)
 
     def push() -> None:
