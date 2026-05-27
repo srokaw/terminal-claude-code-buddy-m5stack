@@ -130,6 +130,36 @@ def test_active_message_resets_deadline(monkeypatch):
     assert result == "allow"
 
 
+def test_active_with_insufficient_budget_bails_to_terminal(monkeypatch):
+    """If queue wait consumed almost all of HOOK_PROCESS_BUDGET, an `active`
+    promotion must fall back to the terminal (return None) rather than promise an
+    on-screen window the process can't survive before Claude Code's external
+    SIGTERM. Here we leave ~1s of budget, below MIN_ON_SCREEN (5s)."""
+    monkeypatch.setattr(hook, "_HOOK_START",
+                        time.monotonic() - (hook.HOOK_PROCESS_BUDGET - 1.0))
+    sock_path = tempfile.mktemp(prefix="buddy_budget_", suffix=".sock", dir="/tmp")
+    monkeypatch.setattr(hook, "SOCK_PATH", sock_path)
+
+    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server_sock.bind(sock_path)
+    server_sock.listen(1)
+
+    def _serve():
+        conn, _ = server_sock.accept()
+        conn.recv(4096)  # consume the permission_request line
+        conn.sendall(json.dumps({"type": "active", "id": "pid-budget"}).encode("utf-8") + b"\n")
+        # A decision follows, but the hook should already have bailed on `active`.
+        conn.sendall(json.dumps({"decision": "allow"}).encode("utf-8") + b"\n")
+        conn.close()
+        server_sock.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    result = hook.request_decision("pid-budget", "sess", "Bash", "echo hi", None)
+    t.join(timeout=5)
+    assert result is None
+
+
 def test_build_detail_unknown_tool_serializes_args():
     detail, change = hook.build_detail("MyCustomTool",
                                        {"url": "https://x.test", "mode": "write"})

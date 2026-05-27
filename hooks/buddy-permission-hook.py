@@ -21,11 +21,24 @@ import uuid
 
 # Cross-process contract: must match bridge/buddy_bridge/__main__.py.
 SOCK_PATH = os.path.expanduser("~/.claude-buddy/bridge.sock")
-# DECISION_TIMEOUT and ASK_TIMEOUT must stay below the `timeout` set on the
-# PermissionRequest hook entry in ~/.claude/settings.json (currently 90 s) so
-# that Claude Code's SIGTERM-cancel relationship holds.
+
+# Two distinct budgets are at play:
+#  - DECISION_TIMEOUT / ASK_TIMEOUT: the ON-SCREEN window granted once the bridge
+#    promotes this prompt to the device (reset on the `active` message so queue
+#    wait doesn't eat it).
+#  - HOOK_PROCESS_BUDGET: an absolute ceiling measured from hook start. Claude
+#    Code SIGTERMs the hook at the `timeout` configured for the PermissionRequest
+#    entry in ~/.claude/settings.json (see hooks/settings.example.json, 180 s).
+#    The on-screen reset CANNOT extend the process past that external SIGTERM, so
+#    we clamp every deadline to HOOK_PROCESS_BUDGET (kept safely below 180 s). If
+#    a prompt sat in the queue so long that too little budget remains to show it
+#    usefully, we fall back to the terminal instead of promising a window the
+#    process can't survive (which would clear the device mid-decision).
 DECISION_TIMEOUT = 30.0  # on-screen seconds for a binary permission
-ASK_TIMEOUT = 85.0       # on-screen seconds for an ask (kept < settings.json 90s)
+ASK_TIMEOUT = 85.0       # on-screen seconds for an ask
+HOOK_PROCESS_BUDGET = 175.0  # absolute seconds from hook start; < settings.json 180 s
+MIN_ON_SCREEN = 5.0      # if fewer process-budget seconds remain at promotion, bail to terminal
+_HOOK_START = time.monotonic()
 
 # Tools that are an interaction, not a buddy-approvable action — a question or
 # a plan, not a command/file/network action. The device's binary allow/deny is
@@ -149,7 +162,8 @@ def request_decision(prompt_id, session, tool, detail, change):
         _send(sock, {"type": "permission_request", "id": prompt_id,
                      "session": session, "tool": tool,
                      "detail": detail, "change": change})
-        deadline = time.monotonic() + DECISION_TIMEOUT
+        abs_deadline = _HOOK_START + HOOK_PROCESS_BUDGET
+        deadline = min(time.monotonic() + DECISION_TIMEOUT, abs_deadline)
         buf = b""
         while True:
             while b"\n" in buf:
@@ -159,7 +173,10 @@ def request_decision(prompt_id, session, tool, detail, change):
                 except ValueError:
                     continue
                 if msg.get("type") == "active":
-                    deadline = time.monotonic() + DECISION_TIMEOUT  # on-screen now
+                    now = time.monotonic()
+                    if abs_deadline - now < MIN_ON_SCREEN:
+                        return None  # too little process budget left to show usefully
+                    deadline = min(now + DECISION_TIMEOUT, abs_deadline)  # on-screen now
                     continue
                 decision = msg.get("decision")
                 return decision if decision in ("allow", "deny") else None
@@ -195,7 +212,8 @@ def request_answers(ask_id, session, multi_select, questions):
                      "session": session,
                      "multiSelect": multi_select,
                      "questions": questions})
-        deadline = time.monotonic() + ASK_TIMEOUT
+        abs_deadline = _HOOK_START + HOOK_PROCESS_BUDGET
+        deadline = min(time.monotonic() + ASK_TIMEOUT, abs_deadline)
         buf = b""
         while True:
             while b"\n" in buf:
@@ -205,7 +223,10 @@ def request_answers(ask_id, session, multi_select, questions):
                 except ValueError:
                     continue
                 if msg.get("type") == "active":
-                    deadline = time.monotonic() + ASK_TIMEOUT
+                    now = time.monotonic()
+                    if abs_deadline - now < MIN_ON_SCREEN:
+                        return None  # too little process budget left to show usefully
+                    deadline = min(now + ASK_TIMEOUT, abs_deadline)
                     continue
                 answers = msg.get("answers")
                 return answers if isinstance(answers, list) else None
