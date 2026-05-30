@@ -707,25 +707,33 @@ void loop() {
     unsigned long now = millis();
     static uint32_t shownPasskey = 0xFFFFFFFF;
     static bool promptShown = false;
-    static bool askShown = false;
+    // Track WHICH ask id is currently drawn (not just whether one is). When the
+    // bridge promotes a queued ask, it sets askId to a new value via the BLE
+    // callback while loop() is blocked in askSendAnswers' splash delay(1000) —
+    // so loop() never observes askId==0 between the two and a plain bool would
+    // stay stuck. Comparing ids redraws whenever the active ask changes.
+    static char shownAskId[48] = {0};
     if (pairing) {
       if (passkeyVal != shownPasskey) {     // draw once per pairing/passkey
         renderPasskey(passkeyVal);
         shownPasskey = passkeyVal;
       }
-      promptShown = false; askShown = false;
+      promptShown = false; shownAskId[0] = 0;
     } else if (promptId[0] != 0) {
       if (!promptShown) {                   // draw prompt takeover once on entry
         renderPrompt(promptTool, promptDetail, promptChange);
         promptShown = true;
       }
-      shownPasskey = 0xFFFFFFFF; askShown = false;
+      shownPasskey = 0xFFFFFFFF; shownAskId[0] = 0;
     } else if (askId[0] != 0) {
-      if (!askShown) { renderAsk(); askShown = true; }  // draw ask once on entry
+      if (strcmp(shownAskId, askId) != 0) {  // redraw when the active id changes
+        renderAsk();
+        strlcpy(shownAskId, askId, sizeof(shownAskId));
+      }
       shownPasskey = 0xFFFFFFFF; promptShown = false;
     } else {
       shownPasskey = 0xFFFFFFFF;            // reset so takeovers redraw next entry
-      promptShown = false; askShown = false;
+      promptShown = false; shownAskId[0] = 0;
       if (now - lastFrameMs >= FRAME_MS) {
         lastFrameMs = now;
         BuddyOverlay ov;
