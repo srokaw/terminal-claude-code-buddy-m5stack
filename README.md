@@ -1,186 +1,291 @@
-# claude-desktop-buddy
+# terminal-claude-code-buddy-m5stack
 
-Claude for macOS and Windows can connect Claude Cowork and Claude Code to
-maker devices over BLE, so developers and makers can build hardware that
-displays permission prompts, recent messages, and other interactions. We've
-been impressed by the creativity of the maker community around Claude -
-providing a lightweight, opt-in API is our way of making it easier to build
-fun little hardware devices that integrate with Claude.
+A desk device that shows the live status of your **terminal** Claude Code
+sessions and lets you approve or deny tool-permission prompts — and answer
+`AskUserQuestion` prompts — right from the device.
 
-> **Building your own device?** You don't need any of the code here. See
-> **[REFERENCE.md](REFERENCE.md)** for the wire protocol: Nordic UART
-> Service UUIDs, JSON schemas, and the folder push transport.
+This is a fork of Anthropic's
+[`claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy),
+re-aimed at people who work in the Claude Code CLI and **don't** want a
+dependency on the Claude desktop app. Instead of the desktop app bridging
+sessions over BLE, a small **local Python bridge** talks to the device, fed by
+**Claude Code hooks**. The device is an **M5Stack Core Basic** (ESP32, 320×240,
+three front buttons) rather than the M5StickC Plus.
 
-As an example, we built a desk pet on ESP32 that lives off permission
-approvals and interaction with Claude. It sleeps when nothing's happening,
-wakes when sessions start, gets visibly impatient when an approval prompt is
-waiting, and lets you approve or deny right from the device.
+> Anthropic's original firmware (`src/`, `characters/`, …) and
+> [REFERENCE.md](REFERENCE.md) are kept in this repo as a **protocol reference**
+> only. You don't need them to run this fork. This project defines its own
+> wire protocol (see [Protocol](#protocol) below).
 
-<p align="center">
-  <img src="docs/device.jpg" alt="M5StickC Plus running the buddy firmware" width="500">
-</p>
+## Architecture
+
+```
+Claude Code (terminal × N)         Local bridge (Python)           M5Stack Core Basic
+──────────────────────────         ─────────────────────           ──────────────────
+ hooks: SessionStart, Stop,  ─sock─▶  • BLE central (bleak)  ─BLE──▶  320×240 animated
+ Notification … feed status          • aggregates all          NUS    buddy
+ PermissionRequest relays the          sessions' state        proto   3 buttons (A/B/C)
+ prompt + waits on the       ◀─sock─  • relays prompt ⇄         ◀──── approve / deny /
+ device (native prompt too)             decision                       auto-approve
+```
+
+Three components live in this repo:
+
+- **`firmware/`** — M5Stack Core Basic firmware (C++ / Arduino / PlatformIO).
+  BLE peripheral over the Nordic UART Service with bonded passkey pairing;
+  renders an **animated buddy** on the home screen (see [The buddy](#the-buddy)),
+  the permission-prompt takeover, and the `AskUserQuestion` screen.
+- **`bridge/`** — Python bridge using `bleak` as the BLE **central**. Maintains
+  aggregated state across all terminal sessions, listens on a Unix domain
+  socket for hook events, and brokers permission/ask prompts between Claude Code
+  and the device.
+- **`hooks/`** — Claude Code hook scripts wired into `~/.claude/settings.json`.
 
 ## Hardware
 
-The firmware targets ESP32 with the Arduino framework. As written, it
-depends on the M5StickCPlus library for its display, IMU, and button
-drivers—so you'll need that board, or a fork that swaps those drivers for
-your own pin layout.
+**M5Stack Core Basic** (ESP32, 320×240 ILI9342C display, three front buttons
+A/B/C). The firmware uses `M5Unified` for display and buttons, so a different
+ESP32 board works only if you adapt those drivers.
 
-## Flashing
+## Setup
+
+### 1. Flash the firmware
 
 Install
 [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/),
-then:
+then from `firmware/`:
 
 ```bash
 pio run -t upload
 ```
 
-If you're starting from a previously-flashed device, wipe it first:
+On first connect the device shows a pairing passkey on its screen (DisplayOnly
+bonding); enter it on the host when prompted.
+
+### 2. Run the bridge
+
+Use a virtualenv. `bleak` (the BLE library) is **not** typically on your system
+Python, so running with a bare `python` will fail with `ModuleNotFoundError: No
+module named 'bleak'` — always invoke the venv's interpreter explicitly:
 
 ```bash
-pio run -t erase && pio run -t upload
+cd bridge
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt      # bleak, pytest, pytest-asyncio
+.venv/bin/python -m buddy_bridge
 ```
 
-Once running, you can also wipe everything from the device itself: **hold A
-→ settings → reset → factory reset → tap twice**.
+The bridge listens on `~/.claude-buddy/bridge.sock` and connects to the device
+over BLE as a central, auto-reconnecting. The macOS Bluetooth permission prompt
+appears on first run; grant it. On startup it logs
+`[bridge] listening on …/bridge.sock`.
 
-## Pairing
+This foreground form is fine for testing, but if the terminal closes the bridge
+dies and sessions silently fall back to keyboard-only (no error surfaces in
+Claude Code). For day-to-day use, run it as a launchd agent (next step).
 
-To pair your device with Claude, first enable developer mode (**Help →
-Troubleshooting → Enable Developer Mode**). Then, open the Hardware Buddy
-window in **Developer → Open Hardware Buddy…**, click **Connect**, and pick
-your device from the list. macOS will prompt for Bluetooth permission on
-first connect; grant it.
+### 3. Run the bridge as a launchd agent (persistent)
 
-<p align="center">
-  <img src="docs/menu.png" alt="Developer → Open Hardware Buddy… menu item" width="420">
-  <img src="docs/hardware-buddy-window.png" alt="Hardware Buddy window with Connect button and folder drop target" width="420">
-</p>
+A launchd **user** agent (not a root daemon) starts the bridge at login and
+restarts it if it ever exits. `bridge/com.claude-buddy.bridge.plist` is a
+template; launchd doesn't expand `~`, so fill in the two absolute-path
+placeholders and install it. From the repo root:
 
-Once paired, the bridge auto-reconnects whenever both sides are awake.
+```bash
+# These dirs may not exist on a fresh account; launchd needs both before it can
+# write the plist and open the log file, or the job fails to start.
+mkdir -p ~/Library/LaunchAgents ~/.claude-buddy
 
-If discovery isn't finding the stick:
+sed -e "s|__REPO_DIR__|$(pwd)|g" -e "s|__HOME__|$HOME|g" \
+  bridge/com.claude-buddy.bridge.plist \
+  > ~/Library/LaunchAgents/com.claude-buddy.bridge.plist
 
-- Make sure it's awake (any button press)
-- Check the stick's settings menu → bluetooth is on
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-buddy.bridge.plist
+launchctl kickstart -k gui/$(id -u)/com.claude-buddy.bridge
+```
+
+Manage it:
+
+```bash
+launchctl print gui/$(id -u)/com.claude-buddy.bridge | grep -E 'state|pid'  # status
+tail -f ~/.claude-buddy/bridge.log                                          # logs
+launchctl kickstart -k gui/$(id -u)/com.claude-buddy.bridge                 # restart
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.claude-buddy.bridge.plist  # stop
+```
+
+> The plist hardcodes the venv path, so if you move or rename the repo,
+> regenerate and reinstall it (the agent will otherwise log a startup failure
+> and back off rather than run).
+
+Lock down the runtime directory so other local accounts can't reach the socket:
+
+```bash
+chmod 700 ~/.claude-buddy
+```
+
+### 4. Wire up the hooks
+
+The hook scripts talk to the bridge over that socket. Merge the `hooks` block
+from [`hooks/settings.example.json`](hooks/settings.example.json) into your
+`~/.claude/settings.json`. The example points at
+`$HOME/terminal-claude-code-buddy-m5stack/hooks/…` (the shell expands `$HOME`);
+edit those paths if you cloned the repo elsewhere:
+
+- `SessionStart` / `SessionEnd` — register / deregister a session.
+- `UserPromptSubmit` / `Stop` / `Notification` — push status updates.
+- `PermissionRequest` — relays the prompt to the device and waits for a button
+  decision (45s for permissions, 60s for `AskUserQuestion`). The `timeout: 90`
+  in the example settings is Claude Code's outer cap on the hook and must stay
+  above those waits.
+
+If the bridge isn't running, the device is disconnected, or the wait times out,
+the hook returns no decision and Claude Code's native terminal prompt stands.
 
 ## Controls
 
-|                         | Normal               | Pet         | Info        | Approval    |
-| ----------------------- | -------------------- | ----------- | ----------- | ----------- |
-| **A** (front)           | next screen          | next screen | next screen | **approve** |
-| **B** (right)           | scroll transcript    | next page   | next page   | **deny**    |
-| **Hold A**              | menu                 | menu        | menu        | menu        |
-| **Power** (left, short) | toggle screen off    |             |             |             |
-| **Power** (left, ~6s)   | hard power off       |             |             |             |
-| **Shake**               | dizzy                |             |             | —           |
-| **Face-down**           | nap (energy refills) |             |             |             |
+| Button        | Status screen   | Permission prompt | Ask screen                |
+| ------------- | --------------- | ----------------- | ------------------------- |
+| **A** (left)  | —               | **Approve**       | pick top row              |
+| **B** (mid)   | toggle **Auto** | toggle **Auto**   | pick middle row           |
+| **C** (right) | —               | **Deny**          | pick bottom row / `More`  |
 
-The screen auto-powers-off after 30s of no interaction (kept on while an
-approval prompt is up). Any button press wakes it.
+On the ask screen the three buttons map directly to the on-screen option rows;
+with four options, the bottom row is `More >>` / `<< Back` to page. In a
+multi-select question a button press toggles that option, and **long-press B**
+submits. **Long-press A** cancels (answer on the laptop instead).
 
-## ASCII pets
+The home screen shows the animated buddy (see [The buddy](#the-buddy) below); a
+bottom strip carries the one-line activity message and a `N sessions` count.
+Auto-approve mode (toggle **B**, available from the home screen or during a
+prompt) shows an **AUTO ON · n** banner with a running
+count of auto-approvals. The banner is repainted on toggle and after each
+auto-approval, but a routine status redraw clears it until the next one. The
+bridge clears its own auto-approve state
+when the device disconnects, but the device keeps the flag and re-asserts it on
+reconnect — so a disconnect does not durably turn it off. Toggle **B** to turn it
+off for real.
 
-Eighteen pets, each with seven animations (sleep, idle, busy, attention,
-celebrate, dizzy, heart). Menu → "next pet" cycles them with a counter.
-Choice persists to NVS.
+## The buddy
 
-## GIF pets
+The home screen is an animated retro-phosphor **"cool-S"** character (the
+schoolyard S doodle), green-on-black. Its animation *is* the status display —
+it reflects live session state rather than showing raw counts:
 
-If you want a custom GIF character instead of an ASCII buddy, drag a
-character pack folder onto the drop target in the Hardware Buddy window. The
-app streams it over BLE and the stick switches to GIF mode live. **Settings
-→ delete char** reverts to ASCII mode.
+| State      | When                                                              |
+| ---------- | ----------------------------------------------------------------- |
+| **sleep**  | bridge not connected — slow breathing, a drifting `z`             |
+| **idle**   | connected, nothing running — step-by-step construction loop       |
+| **busy**   | one or more sessions running — scanline sweep + progress dots     |
+| **heart**  | ~3s after you approve a prompt with **A** — turns red, floating hearts |
 
-A character pack is a folder with `manifest.json` and 96px-wide GIFs:
+Three more states — **attention**, **celebrate**, **dizzy** — are implemented
+but not yet wired to live triggers in this build. A small bottom strip overlays
+the activity message (left) and a `N sessions` count (right); running/waiting
+are conveyed by the animation, not by on-screen numbers.
 
-```json
-{
-  "name": "bufo",
-  "colors": {
-    "body": "#6B8E23",
-    "bg": "#000000",
-    "text": "#FFFFFF",
-    "textDim": "#808080",
-    "ink": "#000000"
-  },
-  "states": {
-    "sleep": "sleep.gif",
-    "idle": ["idle_0.gif", "idle_1.gif", "idle_2.gif"],
-    "busy": "busy.gif",
-    "attention": "attention.gif",
-    "celebrate": "celebrate.gif",
-    "dizzy": "dizzy.gif",
-    "heart": "heart.gif"
-  }
-}
-```
+## Behaviors
 
-State values can be a single filename or an array. Arrays rotate: each
-loop-end advances to the next GIF, useful for an idle activity carousel so
-the home screen doesn't loop one clip forever.
+### Permission prompts (device or keyboard)
 
-GIFs are 96px wide; height up to ~140px stays on a 135×240 portrait screen.
-Crop tight to the character — transparent margins waste screen and shrink
-the sprite. `tools/prep_character.py` handles the resize: feed it source
-GIFs at any sizes and it produces a 96px-wide set where the character is the
-same scale in every state.
+When a tool needs approval, Claude Code shows its **native** terminal prompt as
+usual, and the `PermissionRequest` hook concurrently relays the prompt to the
+device. The hook does not draw its own keyboard UI — it just waits on the bridge
+socket for a button decision. Whichever path resolves first wins:
 
-The whole folder must fit under 1.8MB —
-`gifsicle --lossy=80 -O3 --colors 64` typically cuts 40–60%.
+- **Device button** (relayed through the bridge socket) → the hook returns
+  `allow` / `deny`, preempting the native prompt.
+- **Keyboard** → when Claude Code cancels the hook (it sends `SIGTERM`, e.g.
+  once the native prompt is answered), the hook's handler sends `prompt_cancel`
+  so the device clears its screen.
 
-See `characters/bufo/` for a working example.
+On timeout (45s) the hook also sends `prompt_cancel` and returns no decision, so
+the native prompt stands.
 
-If you're iterating on a character and would rather skip the BLE round-trip,
-`tools/flash_character.py characters/bufo` stages it into `data/` and runs
-`pio run -t uploadfs` directly over USB.
+### AskUserQuestion on the device
 
-## The seven states
+`AskUserQuestion` prompts render on the device with the question text and option
+labels/descriptions. The firmware supports 1–4 questions, 2–4 options each (paged
+at 4), and multi-select. Text is stored in fixed buffers (question 64, label 28,
+description 40 bytes) and longer values are truncated. Answers come back as
+`{label}` or `{labels:[…]}` carrying the device's stored label string — so if a
+label was truncated, the relayed value is the truncated form. Keep option labels
+short. Resolving on the keyboard cancels the device screen and vice versa.
 
-| State       | Trigger                     | Feel                        |
-| ----------- | --------------------------- | --------------------------- |
-| `sleep`     | bridge not connected        | eyes closed, slow breathing |
-| `idle`      | connected, nothing urgent   | blinking, looking around    |
-| `busy`      | sessions actively running   | sweating, working           |
-| `attention` | approval pending            | alert, **LED blinks**       |
-| `celebrate` | level up (every 50K tokens) | confetti, bouncing          |
-| `dizzy`     | you shook the stick         | spiral eyes, wobbling       |
-| `heart`     | approved in under 5s        | floating hearts             |
+### Privacy (load-bearing)
+
+The bridge sends the device only what's needed to decide:
+
+- **Status:** counts and a short one-line message derived from hook metadata.
+- **Permission prompts:** the tool call itself — `Bash` command, file path for
+  `Edit`/`Write` plus a change *size* like `+12/-3`, URL for `WebFetch`. Known
+  tools send the full command/path/URL; an unknown tool's args are summarized
+  (large fields replaced by a length) and capped at 200 bytes by the hook. The
+  device then truncates whatever it receives to its own 200-byte display buffer.
+- **Ask prompts:** question text and option labels/descriptions (truncated on
+  the device per the buffer sizes above).
+
+It **never** sends conversation/message text, file contents or diff bodies, or
+anything read from transcript files. The bridge works solely from live hook
+events and never reads `~/.claude/projects/`.
+
+## Protocol
+
+UTF-8 JSON, one object per line, `\n`-terminated, over the Nordic UART Service
+(`6e400001/2/3-b5a3-f393-e0a9-e50e24dcca9e`). Defined by this project — see
+[`bridge/buddy_bridge/protocol.py`](bridge/buddy_bridge/protocol.py).
+
+**Bridge → device:**
+
+- `{"evt":"status","running":N,"waiting":N,"total":N,"msg":"…"}`
+- `{"evt":"prompt","id":"…","tool":"…","detail":"…","change":"+12/-3"}` — `change` only for `Edit`/`Write`
+- `{"evt":"ask","id":"…","multiSelect":bool,"questions":[{"text":"…","options":[{"label":"…","desc":"…"}]}]}`
+- `{"evt":"auto_fired","tool":"…"}`
+- `{"cmd":"prompt_cancel","id":"…"}` / `{"cmd":"ask_cancel","id":"…"}` / `{"cmd":"get_auto"}`
+
+**Device → bridge:**
+
+- `{"cmd":"permission","id":"…","decision":"allow"|"deny"}`
+- `{"cmd":"auto","state":bool}`
+- `{"cmd":"prompt_busy","id":"…"}` — device can't show this prompt; yield to native UI
+- `{"cmd":"ask_answer","id":"…","answers":[{"label":"…"}|{"labels":[…]}]}`
+- `{"cmd":"ask_cancel","id":"…"}`
 
 ## Project layout
 
 ```
-src/
-  main.cpp       — loop, state machine, UI screens
-  buddy.cpp      — ASCII species dispatch + render helpers
-  buddies/       — one file per species, seven anim functions each
-  ble_bridge.cpp — Nordic UART service, line-buffered TX/RX
-  character.cpp  — GIF decode + render
-  data.h         — wire protocol, JSON parse
-  xfer.h         — folder push receiver
-  stats.h        — NVS-backed stats, settings, owner, species choice
-characters/      — example GIF character packs
-tools/           — generators and converters
+firmware/        — M5Stack Core Basic firmware (PlatformIO)
+  src/main.cpp   — state machine, BLE peripheral, 30fps render loop, prompt/ask/passkey screens
+  src/buddy_*.{h,cpp}  — cool-S buddy: geometry, 7-state animations, palette, rendering
+  test/          — native (host) Unity unit tests for the buddy's pure logic
+bridge/          — Python local bridge (BLE central)
+  buddy_bridge/  — ble_link, socket_server, permissions broker, protocol, state
+  tests/         — pytest suite
+  com.claude-buddy.bridge.plist  — launchd agent template (see Setup step 3)
+hooks/           — Claude Code hook scripts + settings.example.json
+docs/            — design specs and implementation plans (docs/superpowers/)
+src/, characters/, tools/, REFERENCE.md
+                 — Anthropic's original claude-desktop-buddy, kept as protocol reference
 ```
 
-## Availability
+## Tests
 
-The BLE API is only available when the desktop apps are in developer mode
-(**Help → Troubleshooting → Enable Developer Mode**). It's intended for
-makers and developers and isn't an officially supported product feature.
+**Bridge (Python):**
 
----
+```bash
+cd bridge && .venv/bin/python -m pytest
+```
 
-## terminal-claude-code-buddy-m5stack
+(Use `python -m pytest`, not bare `pytest` — the `-m` form puts the bridge
+directory on `sys.path` so the `buddy_bridge` package imports.)
 
-A fork adapting this project for the **M5Stack Core Basic**, driven by a local
-Python bridge instead of the Claude desktop app, for terminal Claude Code users.
+**Firmware (native unit tests):** the buddy's pure logic — geometry, state
+machine, palette, easing, idle-reveal timing — is unit-tested off-device via a
+PlatformIO `native` env, no hardware required:
 
-- `firmware/` — M5Stack Core Basic firmware
-- `bridge/`   — Python local bridge (BLE central)
-- `hooks/`    — Claude Code hook scripts
-- `docs/`     — design spec and implementation plans
+```bash
+cd firmware && pio test -e native
+```
 
-Anthropic's original firmware (`src/`, `characters/`, …) is kept as a protocol reference.
+## License
+
+Inherited from the upstream fork — see [LICENSE](LICENSE).
